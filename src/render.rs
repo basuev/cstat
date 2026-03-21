@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::git::GitInfo;
-use crate::types::{Config, StdinData, ToolEntry, TranscriptData};
+use crate::types::{AgentEntry, Config, StdinData, ToolEntry, TranscriptData};
 
 fn context_percentage(data: &StdinData) -> Option<u8> {
     let cw = data.context_window.as_ref()?;
@@ -29,6 +29,7 @@ const RESET: &str = "\x1b[0m";
 
 const BRIGHT: &str = "\x1b[1;37m";
 const DIM: &str = "\x1b[2m";
+const YELLOW: &str = "\x1b[33m";
 
 fn format_duration(seconds: i64) -> String {
     if seconds < 60 {
@@ -59,11 +60,55 @@ fn render_duration(session_start: Option<i64>, colors: bool) -> Option<String> {
     }
 }
 
-fn render_activity_line(tools: &HashMap<String, ToolEntry>, config: &Config) -> Option<String> {
+fn format_agent_duration(seconds: i64) -> String {
+    if seconds < 0 {
+        return "0s".to_string();
+    }
+    let minutes = seconds / 60;
+    let secs = seconds % 60;
+    if minutes == 0 {
+        format!("{secs}s")
+    } else {
+        format!("{minutes}m {secs}s")
+    }
+}
+
+fn render_agents(agents: &HashMap<String, AgentEntry>, config: &Config) -> Vec<String> {
+    let now = chrono::Utc::now().timestamp();
+    let colors = config.colors();
+    agents
+        .values()
+        .filter(|a| !a.completed)
+        .map(|a| {
+            let name = a
+                .subagent_type
+                .as_deref()
+                .unwrap_or("agent");
+            let model_part = a
+                .model
+                .as_ref()
+                .map(|m| format!("[{m}]"))
+                .unwrap_or_default();
+            let dur = a
+                .start_time
+                .map(|t| format_agent_duration(now - t))
+                .unwrap_or_default();
+            let label = format!("{name}{model_part} {dur}").trim().to_string();
+            if colors {
+                format!("{YELLOW}{label}{RESET}")
+            } else {
+                label
+            }
+        })
+        .collect()
+}
+
+fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<String, AgentEntry>, config: &Config) -> Option<String> {
     let running: Vec<&ToolEntry> = tools.values().filter(|t| !t.completed).collect();
     let completed: Vec<&ToolEntry> = tools.values().filter(|t| t.completed).collect();
+    let has_running_agents = agents.values().any(|a| !a.completed);
 
-    if running.is_empty() && completed.is_empty() {
+    if running.is_empty() && completed.is_empty() && !has_running_agents {
         return None;
     }
 
@@ -112,6 +157,9 @@ fn render_activity_line(tools: &HashMap<String, ToolEntry>, config: &Config) -> 
             parts.push(label);
         }
     }
+
+    let agent_parts = render_agents(agents, config);
+    parts.extend(agent_parts);
 
     if parts.is_empty() {
         return None;
@@ -165,7 +213,7 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
         line.push_str(&format!("{sep}{dur}"));
     }
 
-    if let Some(activity) = render_activity_line(&transcript.tools, config) {
+    if let Some(activity) = render_activity_line(&transcript.tools, &transcript.agents, config) {
         line.push('\n');
         line.push_str(&activity);
     }
@@ -176,7 +224,7 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ContextWindow, CurrentUsage, Model, StdinData, ToolEntry, TranscriptData};
+    use crate::types::{AgentEntry, ContextWindow, CurrentUsage, Model, StdinData, ToolEntry, TranscriptData};
 
     fn make_data(tokens: Option<u64>, window_size: Option<u64>) -> StdinData {
         StdinData {
@@ -530,6 +578,109 @@ mod tests {
         let activity = out.lines().nth(1).unwrap();
         assert_eq!(activity, "Grep");
         assert!(!activity.contains("x1"));
+    }
+
+    #[test]
+    fn activity_line_running_agent_with_model() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("explore".into()),
+                model: Some("haiku".into()),
+                description: Some("find files".into()),
+                start_time: Some(chrono::Utc::now().timestamp() - 135),
+                completed: false,
+            },
+        );
+        let transcript = TranscriptData {
+            agents,
+            ..Default::default()
+        };
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let activity = out.lines().nth(1).unwrap();
+        assert_eq!(activity, "explore[haiku] 2m 15s");
+    }
+
+    #[test]
+    fn activity_line_running_agent_without_model() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("general-purpose".into()),
+                model: None,
+                description: None,
+                start_time: Some(chrono::Utc::now().timestamp() - 45),
+                completed: false,
+            },
+        );
+        let transcript = TranscriptData {
+            agents,
+            ..Default::default()
+        };
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let activity = out.lines().nth(1).unwrap();
+        assert_eq!(activity, "general-purpose 45s");
+    }
+
+    #[test]
+    fn activity_line_completed_agent_hidden() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("explore".into()),
+                model: Some("haiku".into()),
+                description: None,
+                start_time: Some(chrono::Utc::now().timestamp() - 60),
+                completed: true,
+            },
+        );
+        let transcript = TranscriptData {
+            agents,
+            ..Default::default()
+        };
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        assert!(!out.contains('\n'));
+    }
+
+    #[test]
+    fn activity_line_agent_yellow_with_colors() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("explore".into()),
+                model: None,
+                description: None,
+                start_time: Some(chrono::Utc::now().timestamp() - 10),
+                completed: false,
+            },
+        );
+        let transcript = TranscriptData {
+            agents,
+            ..Default::default()
+        };
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &Config::default(), &transcript, None);
+        let activity = out.lines().nth(1).unwrap();
+        assert!(activity.contains(YELLOW));
     }
 
     #[test]
