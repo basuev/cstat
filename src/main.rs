@@ -17,7 +17,8 @@ fn main() {
     if let Some((_, mtime)) = &git {
         st.git_index_mtime = Some(*mtime);
     }
-    let output = render::render(&data, &config, &transcript_data, git_info);
+    let usage = usage::fetch_usage(&mut st);
+    let output = render::render(&data, &config, &transcript_data, git_info, usage.as_ref());
     println!("{output}");
     state::save_state(&st, data.transcript_path.as_deref());
 }

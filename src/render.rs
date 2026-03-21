@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::git::GitInfo;
 use crate::types::{AgentEntry, Config, StdinData, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
+use crate::usage::UsageInfo;
 
 fn context_percentage(data: &StdinData) -> Option<u8> {
     let cw = data.context_window.as_ref()?;
@@ -31,6 +32,8 @@ const BRIGHT: &str = "\x1b[1;37m";
 const DIM: &str = "\x1b[2m";
 const YELLOW: &str = "\x1b[33m";
 const GREEN: &str = "\x1b[32m";
+const BLUE: &str = "\x1b[34m";
+const MAGENTA: &str = "\x1b[35m";
 
 fn format_duration(seconds: i64) -> String {
     if seconds < 60 {
@@ -102,6 +105,39 @@ fn render_agents(agents: &HashMap<String, AgentEntry>, config: &Config) -> Vec<S
             }
         })
         .collect()
+}
+
+fn render_usage(usage: Option<&UsageInfo>, config: &Config) -> Vec<String> {
+    let Some(info) = usage else {
+        return vec![];
+    };
+    let colors = config.colors();
+    let mut parts = vec![];
+    if let Some(pct) = info.usage_5h {
+        let pct_int = pct.round() as u8;
+        let color = if pct > 80.0 { MAGENTA } else { BLUE };
+        let reset_part = info
+            .reset_5h
+            .map(|s| format!(" ({})", format_duration(s)))
+            .unwrap_or_default();
+        let text = format!("5h {pct_int}%{reset_part}");
+        if colors {
+            parts.push(format!("{color}{text}{RESET}"));
+        } else {
+            parts.push(text);
+        }
+    }
+    if let Some(pct) = info.usage_7d {
+        let pct_int = pct.round() as u8;
+        let color = if pct > 80.0 { MAGENTA } else { BLUE };
+        let text = format!("7d {pct_int}%");
+        if colors {
+            parts.push(format!("{color}{text}{RESET}"));
+        } else {
+            parts.push(text);
+        }
+    }
+    parts
 }
 
 fn render_tasks(todos: &[TodoItem], tasks: &HashMap<String, TaskItem>, config: &Config) -> Option<String> {
@@ -193,7 +229,7 @@ fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<Str
     Some(parts.join(sep))
 }
 
-pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, git: Option<&GitInfo>) -> String {
+pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, git: Option<&GitInfo>, usage: Option<&UsageInfo>) -> String {
     let model_name = data
         .model
         .as_ref()
@@ -232,6 +268,10 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
         } else {
             line.push_str(&format!("{sep}ctx {pct}%"));
         }
+    }
+
+    for part in render_usage(usage, config) {
+        line.push_str(&format!("{sep}{part}"));
     }
 
     if let Some(dur) = render_duration(transcript.session_start, colors) {
@@ -287,13 +327,13 @@ mod tests {
             cwd: Some("/home/user/my-project".into()),
             ..Default::default()
         };
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None), "[Opus] my-project");
+        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
     }
 
     #[test]
     fn render_empty_stdin() {
         let data = StdinData::default();
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None), "[cstat] no data");
+        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[cstat] no data");
     }
 
     #[test]
@@ -303,14 +343,14 @@ mod tests {
             cwd: Some("/tmp/foo".into()),
             ..Default::default()
         };
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None), "[cstat] foo");
+        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[cstat] foo");
     }
 
     #[test]
     fn context_green_below_70() {
         let data = make_data(Some(45_000), Some(100_000));
         let cfg = Config::default();
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[32mctx 45%\x1b[0m");
     }
 
@@ -318,7 +358,7 @@ mod tests {
     fn context_yellow_at_70() {
         let data = make_data(Some(70_000), Some(100_000));
         let cfg = Config::default();
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[33mctx 70%\x1b[0m");
     }
 
@@ -326,7 +366,7 @@ mod tests {
     fn context_yellow_at_85() {
         let data = make_data(Some(85_000), Some(100_000));
         let cfg = Config::default();
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[33mctx 85%\x1b[0m");
     }
 
@@ -334,7 +374,7 @@ mod tests {
     fn context_red_above_85() {
         let data = make_data(Some(86_000), Some(100_000));
         let cfg = Config::default();
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[31mctx 86%\x1b[0m");
     }
 
@@ -345,7 +385,7 @@ mod tests {
             colors: Some(false),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None), "[Opus] my-project  ctx 45%");
+        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] my-project  ctx 45%");
     }
 
     #[test]
@@ -357,19 +397,19 @@ mod tests {
             cwd: Some("/home/user/my-project".into()),
             ..Default::default()
         };
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None), "[Opus] my-project");
+        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
     }
 
     #[test]
     fn context_missing_tokens() {
         let data = make_data(None, Some(100_000));
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None), "[Opus] my-project");
+        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
     }
 
     #[test]
     fn context_zero_window_size() {
         let data = make_data(Some(1000), Some(0));
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None), "[Opus] my-project");
+        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
     }
 
     #[test]
@@ -380,7 +420,7 @@ mod tests {
             context_critical: Some(60),
             ..Default::default()
         };
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[33mctx 55%\x1b[0m");
     }
 
@@ -391,7 +431,7 @@ mod tests {
             colors: Some(false),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None), "[Opus] my-project  ctx 33%");
+        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] my-project  ctx 33%");
     }
 
     #[test]
@@ -407,7 +447,7 @@ mod tests {
             path_levels: Some(2),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None), "[Opus] user/my-project");
+        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] user/my-project");
     }
 
     #[test]
@@ -423,7 +463,7 @@ mod tests {
             path_levels: Some(3),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None), "[Opus] home/user/my-project");
+        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] home/user/my-project");
     }
 
     #[test]
@@ -434,7 +474,7 @@ mod tests {
             separator: Some(" | ".into()),
             ..Default::default()
         };
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project | ctx 10%");
     }
 
@@ -445,7 +485,7 @@ mod tests {
             colors: Some(false),
             ..Default::default()
         };
-        let out = render(&data, &cfg, &TranscriptData::default(), None);
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert!(out.contains("my-project  ctx"));
     }
 
@@ -475,7 +515,7 @@ mod tests {
             ..Default::default()
         };
         let transcript = TranscriptData::default();
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         assert!(!out.contains('\n'));
     }
 
@@ -491,7 +531,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], "Edit auth.ts");
@@ -509,7 +549,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[1], "Glob");
     }
@@ -529,7 +569,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         let activity = lines[1];
@@ -552,7 +592,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         let group_count = activity.split("  ").count();
         assert!(group_count <= 3);
@@ -572,7 +612,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains("Edit main.rs"));
         assert!(activity.contains("Read x2"));
@@ -591,7 +631,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &Config::default(), &transcript, None);
+        let out = render(&data, &Config::default(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains(BRIGHT));
         assert!(activity.contains(DIM));
@@ -610,7 +650,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert_eq!(activity, "Grep");
         assert!(!activity.contains("x1"));
@@ -637,7 +677,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert_eq!(activity, "explore[haiku] 2m 15s");
     }
@@ -663,7 +703,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert_eq!(activity, "general-purpose 45s");
     }
@@ -689,7 +729,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         assert!(!out.contains('\n'));
     }
 
@@ -714,7 +754,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &Config::default(), &transcript, None);
+        let out = render(&data, &Config::default(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains(YELLOW));
     }
@@ -737,7 +777,7 @@ mod tests {
             separator: Some(" | ".into()),
             ..Default::default()
         };
-        let out = render(&data, &cfg, &transcript, None);
+        let out = render(&data, &cfg, &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains(" | "));
     }
@@ -750,7 +790,7 @@ mod tests {
             ..Default::default()
         };
         let git = GitInfo { branch: "main".into(), dirty: false };
-        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), Some(&git));
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), Some(&git), None);
         assert_eq!(out, "[Opus] proj git:(main)");
     }
 
@@ -762,7 +802,7 @@ mod tests {
             ..Default::default()
         };
         let git = GitInfo { branch: "feat/x".into(), dirty: true };
-        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), Some(&git));
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), Some(&git), None);
         assert_eq!(out, "[Opus] proj git:(feat/x*)");
     }
 
@@ -774,7 +814,7 @@ mod tests {
             ..Default::default()
         };
         let git = GitInfo { branch: "main".into(), dirty: false };
-        let out = render(&data, &Config::default(), &TranscriptData::default(), Some(&git));
+        let out = render(&data, &Config::default(), &TranscriptData::default(), Some(&git), None);
         assert!(out.contains(DIM));
         assert!(out.contains("git:("));
         assert!(out.contains("main"));
@@ -787,7 +827,7 @@ mod tests {
             cwd: Some("/tmp/proj".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None);
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
         assert!(!out.contains("git:"));
     }
 
@@ -796,7 +836,7 @@ mod tests {
         let data = make_data(Some(45_000), Some(100_000));
         let git = GitInfo { branch: "dev".into(), dirty: false };
         let cfg = Config { colors: Some(false), ..Default::default() };
-        let out = render(&data, &cfg, &TranscriptData::default(), Some(&git));
+        let out = render(&data, &cfg, &TranscriptData::default(), Some(&git), None);
         assert_eq!(out, "[Opus] my-project git:(dev)  ctx 45%");
     }
 
@@ -833,7 +873,7 @@ mod tests {
             session_start: Some(start),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         assert!(out.contains("12m"));
     }
 
@@ -849,7 +889,7 @@ mod tests {
             session_start: Some(start),
             ..Default::default()
         };
-        let out = render(&data, &Config::default(), &transcript, None);
+        let out = render(&data, &Config::default(), &transcript, None, None);
         assert!(out.contains(&format!("{DIM}5m{RESET}")));
     }
 
@@ -860,7 +900,7 @@ mod tests {
             cwd: Some("/tmp/proj".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None);
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] proj");
     }
 
@@ -878,7 +918,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], "tasks 2/3");
@@ -898,7 +938,7 @@ mod tests {
             tasks,
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], "tasks 1/3");
@@ -921,7 +961,7 @@ mod tests {
             tasks,
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[1], "tasks 2/4");
     }
@@ -932,7 +972,7 @@ mod tests {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None);
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
         assert!(!out.contains("tasks"));
         assert!(!out.contains('\n'));
     }
@@ -950,7 +990,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = render(&data, &Config::default(), &transcript, None);
+        let out = render(&data, &Config::default(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains(GREEN));
         assert!(activity.contains("tasks 2/2"));
@@ -969,7 +1009,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = render(&data, &Config::default(), &transcript, None);
+        let out = render(&data, &Config::default(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains(DIM));
         assert!(activity.contains("tasks 1/2"));
@@ -991,9 +1031,125 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         let activity = out.lines().nth(1).unwrap();
         assert!(activity.contains("Read"));
         assert!(activity.contains("tasks 1/2"));
+    }
+
+    #[test]
+    fn usage_5h_and_7d_shown() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let usage = UsageInfo {
+            usage_5h: Some(25.0),
+            usage_7d: Some(60.0),
+            reset_5h: Some(5400),
+        };
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
+        assert!(out.contains("5h 25% (1h 30m)"));
+        assert!(out.contains("7d 60%"));
+    }
+
+    #[test]
+    fn usage_5h_only() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let usage = UsageInfo {
+            usage_5h: Some(10.0),
+            usage_7d: None,
+            reset_5h: None,
+        };
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
+        assert!(out.contains("5h 10%"));
+        assert!(!out.contains("7d"));
+    }
+
+    #[test]
+    fn usage_7d_only() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let usage = UsageInfo {
+            usage_5h: None,
+            usage_7d: Some(40.0),
+            reset_5h: None,
+        };
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
+        assert!(!out.contains("5h"));
+        assert!(out.contains("7d 40%"));
+    }
+
+    #[test]
+    fn usage_omitted_when_none() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
+        assert!(!out.contains("5h"));
+        assert!(!out.contains("7d"));
+    }
+
+    #[test]
+    fn usage_blue_color_below_80() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let usage = UsageInfo {
+            usage_5h: Some(25.0),
+            usage_7d: Some(60.0),
+            reset_5h: None,
+        };
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, Some(&usage));
+        assert!(out.contains(BLUE));
+        assert!(!out.contains(MAGENTA));
+    }
+
+    #[test]
+    fn usage_magenta_color_above_80() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let usage = UsageInfo {
+            usage_5h: Some(85.0),
+            usage_7d: Some(90.0),
+            reset_5h: None,
+        };
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, Some(&usage));
+        assert!(out.contains(MAGENTA));
+    }
+
+    #[test]
+    fn usage_with_context_and_duration() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let usage = UsageInfo {
+            usage_5h: Some(25.0),
+            usage_7d: Some(60.0),
+            reset_5h: Some(5400),
+        };
+        let start = chrono::Utc::now().timestamp() - 720;
+        let transcript = TranscriptData {
+            session_start: Some(start),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None, Some(&usage));
+        assert!(out.contains("ctx 45%"));
+        assert!(out.contains("5h 25%"));
+        assert!(out.contains("7d 60%"));
+        assert!(out.contains("12m"));
     }
 }
