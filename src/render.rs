@@ -1152,4 +1152,312 @@ mod tests {
         assert!(out.contains("7d 60%"));
         assert!(out.contains("12m"));
     }
+
+    fn full_transcript() -> TranscriptData {
+        let mut tools = HashMap::new();
+        tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
+        tools.insert("t2".into(), tool("Edit", Some("b.rs"), false));
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("explore".into()),
+                model: Some("haiku".into()),
+                description: None,
+                start_time: Some(chrono::Utc::now().timestamp() - 30),
+                completed: false,
+            },
+        );
+        let mut tasks = HashMap::new();
+        tasks.insert("tk1".into(), TaskItem { status: TaskStatus::Completed });
+        tasks.insert("tk2".into(), TaskItem { status: TaskStatus::Pending });
+        TranscriptData {
+            tools,
+            agents,
+            todos: vec![
+                TodoItem { content: "x".into(), completed: true },
+                TodoItem { content: "y".into(), completed: false },
+            ],
+            tasks,
+            session_start: Some(chrono::Utc::now().timestamp() - 600),
+        }
+    }
+
+    fn full_usage() -> UsageInfo {
+        UsageInfo {
+            usage_5h: Some(25.0),
+            usage_7d: Some(60.0),
+            reset_5h: Some(3600),
+        }
+    }
+
+    #[test]
+    fn all_data_present_no_colors() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: true };
+        let usage = full_usage();
+        let transcript = full_transcript();
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("[Opus] my-project"));
+        assert!(lines[0].contains("git:(main*)"));
+        assert!(lines[0].contains("ctx 45%"));
+        assert!(lines[0].contains("5h 25%"));
+        assert!(lines[0].contains("7d 60%"));
+        assert!(lines[0].contains("10m"));
+        assert!(lines[1].contains("Edit b.rs"));
+        assert!(lines[1].contains("Read"));
+        assert!(lines[1].contains("explore[haiku]"));
+        assert!(lines[1].contains("tasks 2/4"));
+    }
+
+    #[test]
+    fn all_data_present_with_colors() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let usage = full_usage();
+        let transcript = full_transcript();
+        let out = render(&data, &Config::default(), &transcript, Some(&git), Some(&usage));
+        assert!(out.contains(GREEN));
+        assert!(out.contains(BLUE));
+        assert!(out.contains(DIM));
+        assert!(out.contains(BRIGHT));
+        assert!(out.contains(YELLOW));
+        assert!(out.contains(RESET));
+    }
+
+    #[test]
+    fn all_data_present_custom_separator() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let usage = full_usage();
+        let transcript = full_transcript();
+        let cfg = Config {
+            colors: Some(false),
+            separator: Some(" | ".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &cfg, &transcript, Some(&git), Some(&usage));
+        let line1 = out.lines().next().unwrap();
+        assert!(line1.contains(" | ctx 45%"));
+        assert!(line1.contains(" | 5h 25%"));
+    }
+
+    #[test]
+    fn missing_git_only() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let usage = full_usage();
+        let transcript = full_transcript();
+        let out = render(&data, &no_colors_cfg(), &transcript, None, Some(&usage));
+        assert!(!out.contains("git:"));
+        assert!(out.contains("ctx 45%"));
+        assert!(out.contains("5h 25%"));
+    }
+
+    #[test]
+    fn missing_context_only() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/home/user/my-project".into()),
+            ..Default::default()
+        };
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let usage = full_usage();
+        let transcript = full_transcript();
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
+        assert!(!out.contains("ctx"));
+        assert!(out.contains("git:(main)"));
+        assert!(out.contains("5h 25%"));
+    }
+
+    #[test]
+    fn missing_usage_only() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let transcript = full_transcript();
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), None);
+        assert!(!out.contains("5h"));
+        assert!(!out.contains("7d"));
+        assert!(out.contains("ctx 45%"));
+        assert!(out.contains("git:(main)"));
+    }
+
+    #[test]
+    fn missing_duration_only() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let usage = full_usage();
+        let transcript = TranscriptData {
+            session_start: None,
+            ..full_transcript()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
+        let line1 = out.lines().next().unwrap();
+        assert!(line1.contains("ctx 45%"));
+        assert!(line1.contains("5h 25%"));
+        let parts: Vec<&str> = line1.split("  ").collect();
+        assert!(!parts.iter().any(|p| p.contains('m') && !p.contains('%') && !p.contains("my-project") && !p.contains("git:")));
+    }
+
+    #[test]
+    fn missing_activity_only() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let usage = full_usage();
+        let transcript = TranscriptData {
+            todos: vec![
+                TodoItem { content: "x".into(), completed: true },
+                TodoItem { content: "y".into(), completed: false },
+            ],
+            session_start: Some(chrono::Utc::now().timestamp() - 600),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "tasks 1/2");
+    }
+
+    #[test]
+    fn missing_tasks_only() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: false };
+        let usage = full_usage();
+        let mut tools = HashMap::new();
+        tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
+        let transcript = TranscriptData {
+            tools,
+            session_start: Some(chrono::Utc::now().timestamp() - 600),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(!lines[1].contains("tasks"));
+    }
+
+    #[test]
+    fn all_blocks_missing() {
+        let data = StdinData::default();
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
+        assert_eq!(out, "[cstat] no data");
+        assert!(!out.contains('\n'));
+    }
+
+    #[test]
+    fn all_blocks_missing_no_colors() {
+        let data = StdinData::default();
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
+        assert_eq!(out, "[cstat] no data");
+        assert!(!out.contains('\x1b'));
+    }
+
+    #[test]
+    fn no_ansi_codes_when_colors_off() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let git = GitInfo { branch: "main".into(), dirty: true };
+        let usage = full_usage();
+        let transcript = full_transcript();
+        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
+        assert!(!out.contains('\x1b'));
+    }
+
+    #[test]
+    fn output_never_empty() {
+        let data = StdinData::default();
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn output_no_trailing_newline() {
+        let data = make_data(Some(45_000), Some(100_000));
+        let transcript = full_transcript();
+        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
+        assert!(!out.ends_with('\n'));
+    }
+
+    #[test]
+    fn first_line_never_empty() {
+        let data = StdinData::default();
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
+        let first = out.lines().next().unwrap();
+        assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn format_agent_duration_zero() {
+        assert_eq!(format_agent_duration(0), "0s");
+    }
+
+    #[test]
+    fn format_agent_duration_negative() {
+        assert_eq!(format_agent_duration(-5), "0s");
+    }
+
+    #[test]
+    fn format_agent_duration_seconds() {
+        assert_eq!(format_agent_duration(45), "45s");
+    }
+
+    #[test]
+    fn format_agent_duration_minutes_and_seconds() {
+        assert_eq!(format_agent_duration(135), "2m 15s");
+    }
+
+    #[test]
+    fn render_duration_future_start_returns_none() {
+        let future = chrono::Utc::now().timestamp() + 1000;
+        assert!(render_duration(Some(future), false).is_none());
+    }
+
+    #[test]
+    fn render_duration_none_start_returns_none() {
+        assert!(render_duration(None, false).is_none());
+    }
+
+    #[test]
+    fn context_percentage_none_when_no_context_window() {
+        let data = StdinData::default();
+        assert!(context_percentage(&data).is_none());
+    }
+
+    #[test]
+    fn context_percentage_none_when_no_size() {
+        let data = make_data(Some(1000), None);
+        assert!(context_percentage(&data).is_none());
+    }
+
+    #[test]
+    fn render_usage_empty_when_none() {
+        let parts = render_usage(None, &Config::default());
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn render_tasks_none_when_empty() {
+        assert!(render_tasks(&[], &HashMap::new(), &Config::default()).is_none());
+    }
+
+    #[test]
+    fn activity_line_none_when_empty() {
+        assert!(render_activity_line(&HashMap::new(), &HashMap::new(), &Config::default()).is_none());
+    }
+
+    #[test]
+    fn activity_line_with_only_completed_agents_is_none() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("explore".into()),
+                model: None,
+                description: None,
+                start_time: Some(chrono::Utc::now().timestamp() - 30),
+                completed: true,
+            },
+        );
+        assert!(render_activity_line(&HashMap::new(), &agents, &Config::default()).is_none());
+    }
 }
