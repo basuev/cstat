@@ -34,8 +34,13 @@ pub fn render(data: &StdinData, config: &Config) -> String {
     let project_name = data
         .cwd
         .as_deref()
-        .and_then(|p| p.rsplit('/').next())
-        .unwrap_or("no data");
+        .map(|p| {
+            let parts: Vec<&str> = p.rsplit('/').take(config.path_levels() as usize).collect();
+            let mut parts = parts;
+            parts.reverse();
+            parts.join("/")
+        })
+        .unwrap_or_else(|| "no data".into());
 
     let sep = config.separator();
     let colors = config.colors();
@@ -189,6 +194,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(render(&data, &cfg), "[Opus] my-project  ctx 33%");
+    }
+
+    #[test]
+    fn path_levels_2() {
+        let data = StdinData {
+            model: Some(Model {
+                display_name: Some("Opus".into()),
+            }),
+            cwd: Some("/home/user/my-project".into()),
+            ..Default::default()
+        };
+        let cfg = Config {
+            path_levels: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(render(&data, &cfg), "[Opus] user/my-project");
+    }
+
+    #[test]
+    fn path_levels_3() {
+        let data = StdinData {
+            model: Some(Model {
+                display_name: Some("Opus".into()),
+            }),
+            cwd: Some("/home/user/my-project".into()),
+            ..Default::default()
+        };
+        let cfg = Config {
+            path_levels: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(render(&data, &cfg), "[Opus] home/user/my-project");
+    }
+
+    #[test]
+    fn custom_separator() {
+        let data = make_data(Some(10_000), Some(100_000));
+        let cfg = Config {
+            colors: Some(false),
+            separator: Some(" | ".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &cfg);
+        assert_eq!(out, "[Opus] my-project | ctx 10%");
     }
 
     #[test]
