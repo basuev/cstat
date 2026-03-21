@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::git::GitInfo;
-use crate::types::{AgentEntry, Config, StdinData, ToolEntry, TranscriptData};
+use crate::types::{AgentEntry, Config, StdinData, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
 
 fn context_percentage(data: &StdinData) -> Option<u8> {
     let cw = data.context_window.as_ref()?;
@@ -30,6 +30,7 @@ const RESET: &str = "\x1b[0m";
 const BRIGHT: &str = "\x1b[1;37m";
 const DIM: &str = "\x1b[2m";
 const YELLOW: &str = "\x1b[33m";
+const GREEN: &str = "\x1b[32m";
 
 fn format_duration(seconds: i64) -> String {
     if seconds < 60 {
@@ -101,6 +102,30 @@ fn render_agents(agents: &HashMap<String, AgentEntry>, config: &Config) -> Vec<S
             }
         })
         .collect()
+}
+
+fn render_tasks(todos: &[TodoItem], tasks: &HashMap<String, TaskItem>, config: &Config) -> Option<String> {
+    let todo_total = todos.len();
+    let todo_completed = todos.iter().filter(|t| t.completed).count();
+
+    let task_total = tasks.len();
+    let task_completed = tasks.values().filter(|t| t.status == TaskStatus::Completed).count();
+
+    let total = todo_total + task_total;
+    let completed = todo_completed + task_completed;
+
+    if total == 0 {
+        return None;
+    }
+
+    let label = format!("tasks {completed}/{total}");
+    let colors = config.colors();
+    if colors {
+        let color = if completed == total { GREEN } else { DIM };
+        Some(format!("{color}{label}{RESET}"))
+    } else {
+        Some(label)
+    }
 }
 
 fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<String, AgentEntry>, config: &Config) -> Option<String> {
@@ -213,9 +238,20 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
         line.push_str(&format!("{sep}{dur}"));
     }
 
-    if let Some(activity) = render_activity_line(&transcript.tools, &transcript.agents, config) {
+    let activity = render_activity_line(&transcript.tools, &transcript.agents, config);
+    let tasks = render_tasks(&transcript.todos, &transcript.tasks, config);
+
+    if activity.is_some() || tasks.is_some() {
         line.push('\n');
-        line.push_str(&activity);
+        let sep = config.separator();
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(ref a) = activity {
+            parts.push(a);
+        }
+        if let Some(ref t) = tasks {
+            parts.push(t);
+        }
+        line.push_str(&parts.join(sep));
     }
 
     line
@@ -224,7 +260,7 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentEntry, ContextWindow, CurrentUsage, Model, StdinData, ToolEntry, TranscriptData};
+    use crate::types::{AgentEntry, ContextWindow, CurrentUsage, Model, StdinData, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
 
     fn make_data(tokens: Option<u64>, window_size: Option<u64>) -> StdinData {
         StdinData {
@@ -826,5 +862,138 @@ mod tests {
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None);
         assert_eq!(out, "[Opus] proj");
+    }
+
+    #[test]
+    fn tasks_shown_from_todos() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let transcript = TranscriptData {
+            todos: vec![
+                TodoItem { content: "a".into(), completed: true },
+                TodoItem { content: "b".into(), completed: false },
+                TodoItem { content: "c".into(), completed: true },
+            ],
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "tasks 2/3");
+    }
+
+    #[test]
+    fn tasks_shown_from_task_items() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let mut tasks = HashMap::new();
+        tasks.insert("t1".into(), TaskItem { status: TaskStatus::Completed });
+        tasks.insert("t2".into(), TaskItem { status: TaskStatus::Pending });
+        tasks.insert("t3".into(), TaskItem { status: TaskStatus::InProgress });
+        let transcript = TranscriptData {
+            tasks,
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "tasks 1/3");
+    }
+
+    #[test]
+    fn tasks_combined_todos_and_task_items() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let mut tasks = HashMap::new();
+        tasks.insert("t1".into(), TaskItem { status: TaskStatus::Completed });
+        tasks.insert("t2".into(), TaskItem { status: TaskStatus::Pending });
+        let transcript = TranscriptData {
+            todos: vec![
+                TodoItem { content: "a".into(), completed: true },
+                TodoItem { content: "b".into(), completed: false },
+            ],
+            tasks,
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "tasks 2/4");
+    }
+
+    #[test]
+    fn tasks_hidden_when_empty() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None);
+        assert!(!out.contains("tasks"));
+        assert!(!out.contains('\n'));
+    }
+
+    #[test]
+    fn tasks_green_when_all_completed() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let transcript = TranscriptData {
+            todos: vec![
+                TodoItem { content: "a".into(), completed: true },
+                TodoItem { content: "b".into(), completed: true },
+            ],
+            ..Default::default()
+        };
+        let out = render(&data, &Config::default(), &transcript, None);
+        let activity = out.lines().nth(1).unwrap();
+        assert!(activity.contains(GREEN));
+        assert!(activity.contains("tasks 2/2"));
+    }
+
+    #[test]
+    fn tasks_dim_when_not_all_completed() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let transcript = TranscriptData {
+            todos: vec![
+                TodoItem { content: "a".into(), completed: true },
+                TodoItem { content: "b".into(), completed: false },
+            ],
+            ..Default::default()
+        };
+        let out = render(&data, &Config::default(), &transcript, None);
+        let activity = out.lines().nth(1).unwrap();
+        assert!(activity.contains(DIM));
+        assert!(activity.contains("tasks 1/2"));
+    }
+
+    #[test]
+    fn tasks_alongside_tools_on_activity_line() {
+        let data = StdinData {
+            cwd: Some("/tmp/p".into()),
+            ..Default::default()
+        };
+        let mut tools = HashMap::new();
+        tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
+        let transcript = TranscriptData {
+            tools,
+            todos: vec![
+                TodoItem { content: "a".into(), completed: true },
+                TodoItem { content: "b".into(), completed: false },
+            ],
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        let activity = out.lines().nth(1).unwrap();
+        assert!(activity.contains("Read"));
+        assert!(activity.contains("tasks 1/2"));
     }
 }

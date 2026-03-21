@@ -57,6 +57,7 @@ pub struct State {
     pub tools: HashMap<String, ToolEntry>,
     pub agents: HashMap<String, AgentEntry>,
     pub todos: Vec<TodoItem>,
+    pub tasks: HashMap<String, TaskItem>,
     pub session_start: Option<i64>,
     pub git_index_mtime: Option<i64>,
     pub usage_cache: Option<UsageCache>,
@@ -85,6 +86,18 @@ pub struct TodoItem {
     pub completed: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TaskItem {
+    pub status: TaskStatus,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UsageCache {
     pub fetched_at: i64,
@@ -99,5 +112,6 @@ pub struct TranscriptData {
     pub tools: HashMap<String, ToolEntry>,
     pub agents: HashMap<String, AgentEntry>,
     pub todos: Vec<TodoItem>,
+    pub tasks: HashMap<String, TaskItem>,
     pub session_start: Option<i64>,
 }

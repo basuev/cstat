@@ -4,7 +4,7 @@ use std::os::unix::fs::MetadataExt;
 use memmap2::Mmap;
 use serde_json::Value;
 
-use crate::types::{AgentEntry, State, TodoItem, ToolEntry, TranscriptData};
+use crate::types::{AgentEntry, State, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
 
 pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData {
     let Some(path) = path else {
@@ -31,6 +31,7 @@ pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData
         state.tools.clear();
         state.agents.clear();
         state.todos.clear();
+        state.tasks.clear();
         state.session_start = None;
     }
 
@@ -80,6 +81,7 @@ pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData
         tools: state.tools.clone(),
         agents: state.agents.clone(),
         todos: state.todos.clone(),
+        tasks: state.tasks.clone(),
         session_start: state.session_start,
     }
 }
@@ -157,6 +159,29 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                         })
                     })
                     .collect();
+            }
+        } else if name == "TaskCreate" {
+            let status = input
+                .and_then(|i| i.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending");
+            state.tasks.insert(
+                id.to_string(),
+                TaskItem {
+                    status: parse_task_status(status),
+                },
+            );
+        } else if name == "TaskUpdate" {
+            let task_id = input
+                .and_then(|i| i.get("taskId"))
+                .and_then(|v| v.as_str());
+            let status = input
+                .and_then(|i| i.get("status"))
+                .and_then(|v| v.as_str());
+            if let (Some(task_id), Some(status)) = (task_id, status) {
+                if let Some(task) = state.tasks.get_mut(task_id) {
+                    task.status = parse_task_status(status);
+                }
             }
         } else {
             state.tools.insert(
@@ -244,6 +269,14 @@ fn normalize_status(status: &str) -> &str {
         "completed" | "complete" | "done" => "completed",
         "in_progress" | "running" => "in_progress",
         _ => "pending",
+    }
+}
+
+fn parse_task_status(status: &str) -> TaskStatus {
+    match normalize_status(status) {
+        "completed" => TaskStatus::Completed,
+        "in_progress" => TaskStatus::InProgress,
+        _ => TaskStatus::Pending,
     }
 }
 
@@ -543,6 +576,132 @@ mod tests {
         assert!(data.todos[0].completed);
         assert!(!data.todos[1].completed);
         assert!(!data.todos[2].completed);
+    }
+
+    #[test]
+    fn task_create_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_tool_use(
+                "tc1",
+                "TaskCreate",
+                serde_json::json!({
+                    "subject": "implement feature",
+                    "description": "details",
+                    "status": "pending"
+                }),
+            ),
+            make_tool_use(
+                "tc2",
+                "TaskCreate",
+                serde_json::json!({
+                    "subject": "write tests",
+                    "status": "in_progress"
+                }),
+            ),
+        ];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert_eq!(data.tasks.len(), 2);
+        assert_eq!(data.tasks["tc1"].status, TaskStatus::Pending);
+        assert_eq!(data.tasks["tc2"].status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn task_update_changes_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_tool_use(
+                "tc1",
+                "TaskCreate",
+                serde_json::json!({
+                    "subject": "do thing",
+                    "status": "pending"
+                }),
+            ),
+            make_tool_use(
+                "tu1",
+                "TaskUpdate",
+                serde_json::json!({
+                    "taskId": "tc1",
+                    "status": "completed"
+                }),
+            ),
+        ];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert_eq!(data.tasks["tc1"].status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn task_update_unknown_id_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![make_tool_use(
+            "tu1",
+            "TaskUpdate",
+            serde_json::json!({
+                "taskId": "nonexistent",
+                "status": "completed"
+            }),
+        )];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+        assert!(data.tasks.is_empty());
+    }
+
+    #[test]
+    fn status_normalization() {
+        assert_eq!(normalize_status("pending"), "pending");
+        assert_eq!(normalize_status("not_started"), "pending");
+        assert_eq!(normalize_status("in_progress"), "in_progress");
+        assert_eq!(normalize_status("running"), "in_progress");
+        assert_eq!(normalize_status("completed"), "completed");
+        assert_eq!(normalize_status("complete"), "completed");
+        assert_eq!(normalize_status("done"), "completed");
+    }
+
+    #[test]
+    fn task_create_status_normalization() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_tool_use(
+                "tc1",
+                "TaskCreate",
+                serde_json::json!({"subject": "a", "status": "not_started"}),
+            ),
+            make_tool_use(
+                "tc2",
+                "TaskCreate",
+                serde_json::json!({"subject": "b", "status": "running"}),
+            ),
+            make_tool_use(
+                "tc3",
+                "TaskCreate",
+                serde_json::json!({"subject": "c", "status": "done"}),
+            ),
+            make_tool_use(
+                "tc4",
+                "TaskCreate",
+                serde_json::json!({"subject": "d", "status": "complete"}),
+            ),
+        ];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert_eq!(data.tasks["tc1"].status, TaskStatus::Pending);
+        assert_eq!(data.tasks["tc2"].status, TaskStatus::InProgress);
+        assert_eq!(data.tasks["tc3"].status, TaskStatus::Completed);
+        assert_eq!(data.tasks["tc4"].status, TaskStatus::Completed);
     }
 
     #[test]
