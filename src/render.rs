@@ -30,6 +30,35 @@ const RESET: &str = "\x1b[0m";
 const BRIGHT: &str = "\x1b[1;37m";
 const DIM: &str = "\x1b[2m";
 
+fn format_duration(seconds: i64) -> String {
+    if seconds < 60 {
+        return "<1m".to_string();
+    }
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let remaining_minutes = minutes % 60;
+    if hours == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{hours}h {remaining_minutes}m")
+    }
+}
+
+fn render_duration(session_start: Option<i64>, colors: bool) -> Option<String> {
+    let start = session_start?;
+    let now = chrono::Utc::now().timestamp();
+    let elapsed = now - start;
+    if elapsed < 0 {
+        return None;
+    }
+    let text = format_duration(elapsed);
+    if colors {
+        Some(format!("{DIM}{text}{RESET}"))
+    } else {
+        Some(text)
+    }
+}
+
 fn render_activity_line(tools: &HashMap<String, ToolEntry>, config: &Config) -> Option<String> {
     let running: Vec<&ToolEntry> = tools.values().filter(|t| !t.completed).collect();
     let completed: Vec<&ToolEntry> = tools.values().filter(|t| t.completed).collect();
@@ -130,6 +159,10 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
         } else {
             line.push_str(&format!("{sep}ctx {pct}%"));
         }
+    }
+
+    if let Some(dur) = render_duration(transcript.session_start, colors) {
+        line.push_str(&format!("{sep}{dur}"));
     }
 
     if let Some(activity) = render_activity_line(&transcript.tools, config) {
@@ -578,5 +611,69 @@ mod tests {
         let cfg = Config { colors: Some(false), ..Default::default() };
         let out = render(&data, &cfg, &TranscriptData::default(), Some(&git));
         assert_eq!(out, "[Opus] my-project git:(dev)  ctx 45%");
+    }
+
+    #[test]
+    fn format_duration_under_minute() {
+        assert_eq!(format_duration(0), "<1m");
+        assert_eq!(format_duration(30), "<1m");
+        assert_eq!(format_duration(59), "<1m");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(60), "1m");
+        assert_eq!(format_duration(120), "2m");
+        assert_eq!(format_duration(3599), "59m");
+    }
+
+    #[test]
+    fn format_duration_hours_and_minutes() {
+        assert_eq!(format_duration(3600), "1h 0m");
+        assert_eq!(format_duration(5400), "1h 30m");
+        assert_eq!(format_duration(7200), "2h 0m");
+    }
+
+    #[test]
+    fn duration_displayed_on_first_line() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let start = chrono::Utc::now().timestamp() - 720;
+        let transcript = TranscriptData {
+            session_start: Some(start),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &transcript, None);
+        assert!(out.contains("12m"));
+    }
+
+    #[test]
+    fn duration_dim_with_colors() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let start = chrono::Utc::now().timestamp() - 300;
+        let transcript = TranscriptData {
+            session_start: Some(start),
+            ..Default::default()
+        };
+        let out = render(&data, &Config::default(), &transcript, None);
+        assert!(out.contains(&format!("{DIM}5m{RESET}")));
+    }
+
+    #[test]
+    fn duration_omitted_when_no_session_start() {
+        let data = StdinData {
+            model: Some(Model { display_name: Some("Opus".into()) }),
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        };
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None);
+        assert_eq!(out, "[Opus] proj");
     }
 }
