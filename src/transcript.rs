@@ -1,5 +1,569 @@
-use crate::types::{State, TranscriptData};
+use std::fs;
+use std::os::unix::fs::MetadataExt;
 
-pub fn parse_transcript(_path: Option<&str>, _state: &mut State) -> TranscriptData {
-    TranscriptData::default()
+use memmap2::Mmap;
+use serde_json::Value;
+
+use crate::types::{AgentEntry, State, TodoItem, ToolEntry, TranscriptData};
+
+pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData {
+    let Some(path) = path else {
+        return TranscriptData::default();
+    };
+
+    let Ok(file) = fs::File::open(path) else {
+        return TranscriptData::default();
+    };
+
+    let Ok(meta) = file.metadata() else {
+        return TranscriptData::default();
+    };
+
+    let inode = meta.ino();
+    let file_size = meta.len();
+
+    if file_size == 0 {
+        return TranscriptData::default();
+    }
+
+    if inode != state.inode || file_size < state.file_size {
+        state.byte_offset = 0;
+        state.tools.clear();
+        state.agents.clear();
+        state.todos.clear();
+        state.session_start = None;
+    }
+
+    state.inode = inode;
+    state.file_size = file_size;
+
+    let Ok(mmap) = (unsafe { Mmap::map(&file) }) else {
+        return TranscriptData::default();
+    };
+
+    let start = (state.byte_offset as usize).min(mmap.len());
+    let slice = &mmap[start..];
+
+    for line in slice.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+
+        if state.session_start.is_none() {
+            if let Some(ts) = entry.get("timestamp").and_then(|v| v.as_str()) {
+                if let Ok(dt) = ts.parse::<chrono::DateTime<chrono::Utc>>() {
+                    state.session_start = Some(dt.timestamp());
+                }
+            }
+        }
+
+        let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        match entry_type {
+            "assistant" => {
+                parse_assistant_message(&entry, state);
+            }
+            "user" => {
+                parse_tool_results(&entry, state);
+            }
+            _ => {}
+        }
+    }
+
+    state.byte_offset = mmap.len() as u64;
+
+    TranscriptData {
+        tools: state.tools.clone(),
+        agents: state.agents.clone(),
+        todos: state.todos.clone(),
+        session_start: state.session_start,
+    }
+}
+
+fn parse_assistant_message(entry: &Value, state: &mut State) {
+    let Some(content) = entry
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return;
+    };
+
+    for block in content {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if block_type != "tool_use" {
+            continue;
+        }
+
+        let Some(id) = block.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = block
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let input = block.get("input");
+
+        let target = extract_target(name, input);
+
+        if name == "Agent" || name == "Task" {
+            let subagent_type = input
+                .and_then(|i| i.get("subagent_type"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let model = input
+                .and_then(|i| i.get("model"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let description = input
+                .and_then(|i| i.get("description"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let timestamp = entry.get("timestamp").and_then(|v| v.as_str());
+            let start_time = timestamp.and_then(|ts| {
+                ts.parse::<chrono::DateTime<chrono::Utc>>()
+                    .ok()
+                    .map(|dt| dt.timestamp())
+            });
+
+            state.agents.insert(
+                id.to_string(),
+                AgentEntry {
+                    subagent_type,
+                    model,
+                    description,
+                    start_time,
+                    completed: false,
+                },
+            );
+        } else if name == "TodoWrite" {
+            if let Some(todos) = input.and_then(|i| i.get("todos")).and_then(|v| v.as_array()) {
+                state.todos = todos
+                    .iter()
+                    .filter_map(|t| {
+                        let content = t.get("content").and_then(|v| v.as_str())?;
+                        let status = t
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending");
+                        Some(TodoItem {
+                            content: content.to_string(),
+                            completed: normalize_status(status) == "completed",
+                        })
+                    })
+                    .collect();
+            }
+        } else {
+            state.tools.insert(
+                id.to_string(),
+                ToolEntry {
+                    name: name.to_string(),
+                    target,
+                    completed: false,
+                    error: false,
+                },
+            );
+        }
+    }
+}
+
+fn parse_tool_results(entry: &Value, state: &mut State) {
+    let Some(content) = entry
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return;
+    };
+
+    for block in content {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if block_type != "tool_result" {
+            continue;
+        }
+
+        let Some(tool_use_id) = block.get("tool_use_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let is_error = block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if let Some(tool) = state.tools.get_mut(tool_use_id) {
+            tool.completed = true;
+            tool.error = is_error;
+        }
+
+        if let Some(agent) = state.agents.get_mut(tool_use_id) {
+            agent.completed = true;
+        }
+    }
+}
+
+fn extract_target(name: &str, input: Option<&Value>) -> Option<String> {
+    let input = input?;
+    match name {
+        "Read" | "Write" | "Edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| short_path(p)),
+        "Glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        "Grep" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        "Bash" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate(s, 30)),
+        _ => None,
+    }
+}
+
+fn short_path(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
+}
+
+fn normalize_status(status: &str) -> &str {
+    match status {
+        "completed" | "complete" | "done" => "completed",
+        "in_progress" | "running" => "in_progress",
+        _ => "pending",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn make_tool_use(id: &str, name: &str, input: Value) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-03-22T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn make_tool_result(tool_use_id: &str, is_error: bool) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-03-22T10:00:01.000Z",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "is_error": is_error,
+                    "content": "ok"
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn write_transcript(dir: &tempfile::TempDir, lines: &[String]) -> String {
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn missing_path_returns_default() {
+        let mut state = State::default();
+        let data = parse_transcript(None, &mut state);
+        assert!(data.tools.is_empty());
+    }
+
+    #[test]
+    fn missing_file_returns_default() {
+        let mut state = State::default();
+        let data = parse_transcript(Some("/nonexistent.jsonl"), &mut state);
+        assert!(data.tools.is_empty());
+    }
+
+    #[test]
+    fn tool_use_creates_running_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![make_tool_use(
+            "t1",
+            "Read",
+            serde_json::json!({"file_path": "/foo/bar.rs"}),
+        )];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert_eq!(data.tools.len(), 1);
+        let tool = &data.tools["t1"];
+        assert_eq!(tool.name, "Read");
+        assert_eq!(tool.target.as_deref(), Some("bar.rs"));
+        assert!(!tool.completed);
+    }
+
+    #[test]
+    fn tool_result_marks_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_tool_use("t1", "Read", serde_json::json!({"file_path": "/foo/bar.rs"})),
+            make_tool_result("t1", false),
+        ];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert!(data.tools["t1"].completed);
+        assert!(!data.tools["t1"].error);
+    }
+
+    #[test]
+    fn tool_result_marks_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_tool_use("t1", "Bash", serde_json::json!({"command": "false"})),
+            make_tool_result("t1", true),
+        ];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert!(data.tools["t1"].completed);
+        assert!(data.tools["t1"].error);
+    }
+
+    #[test]
+    fn incremental_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(
+                f,
+                "{}",
+                make_tool_use("t1", "Read", serde_json::json!({"file_path": "/a.rs"}))
+            )
+            .unwrap();
+        }
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(path.to_str().unwrap()), &mut state);
+        assert_eq!(data.tools.len(), 1);
+        let offset_after_first = state.byte_offset;
+        assert!(offset_after_first > 0);
+
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(
+                f,
+                "{}",
+                make_tool_use("t2", "Write", serde_json::json!({"file_path": "/b.rs"}))
+            )
+            .unwrap();
+        }
+
+        let data = parse_transcript(Some(path.to_str().unwrap()), &mut state);
+        assert_eq!(data.tools.len(), 2);
+        assert!(state.byte_offset > offset_after_first);
+    }
+
+    #[test]
+    fn session_reset_on_inode_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![make_tool_use(
+            "t1",
+            "Read",
+            serde_json::json!({"file_path": "/a.rs"}),
+        )];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        parse_transcript(Some(&path), &mut state);
+        assert_eq!(state.tools.len(), 1);
+
+        state.inode = 99999;
+
+        let data = parse_transcript(Some(&path), &mut state);
+        assert_eq!(data.tools.len(), 1);
+        assert!(data.tools.contains_key("t1"));
+    }
+
+    #[test]
+    fn session_reset_on_size_shrink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(
+                f,
+                "{}",
+                make_tool_use("t1", "Read", serde_json::json!({"file_path": "/a.rs"}))
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "{}",
+                make_tool_use("t2", "Write", serde_json::json!({"file_path": "/b.rs"}))
+            )
+            .unwrap();
+        }
+
+        let mut state = State::default();
+        parse_transcript(Some(path.to_str().unwrap()), &mut state);
+        assert_eq!(state.tools.len(), 2);
+
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(
+                f,
+                "{}",
+                make_tool_use("t3", "Grep", serde_json::json!({"pattern": "foo"}))
+            )
+            .unwrap();
+        }
+
+        let data = parse_transcript(Some(path.to_str().unwrap()), &mut state);
+        assert_eq!(data.tools.len(), 1);
+        assert!(data.tools.contains_key("t3"));
+    }
+
+    #[test]
+    fn malformed_lines_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, "not json at all").unwrap();
+        writeln!(f, "{{\"broken").unwrap();
+        writeln!(
+            f,
+            "{}",
+            make_tool_use("t1", "Read", serde_json::json!({"file_path": "/a.rs"}))
+        )
+        .unwrap();
+        drop(f);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(path.to_str().unwrap()), &mut state);
+        assert_eq!(data.tools.len(), 1);
+    }
+
+    #[test]
+    fn session_start_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![make_tool_use(
+            "t1",
+            "Read",
+            serde_json::json!({"file_path": "/a.rs"}),
+        )];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+        assert!(data.session_start.is_some());
+    }
+
+    #[test]
+    fn agent_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            make_tool_use(
+                "a1",
+                "Agent",
+                serde_json::json!({
+                    "subagent_type": "Explore",
+                    "model": "haiku",
+                    "description": "find files"
+                }),
+            ),
+            make_tool_result("a1", false),
+        ];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert_eq!(data.agents.len(), 1);
+        let agent = &data.agents["a1"];
+        assert_eq!(agent.subagent_type.as_deref(), Some("Explore"));
+        assert_eq!(agent.model.as_deref(), Some("haiku"));
+        assert!(agent.completed);
+    }
+
+    #[test]
+    fn todo_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![make_tool_use(
+            "tw1",
+            "TodoWrite",
+            serde_json::json!({
+                "todos": [
+                    {"content": "task a", "status": "completed"},
+                    {"content": "task b", "status": "pending"},
+                    {"content": "task c", "status": "in_progress"}
+                ]
+            }),
+        )];
+        let path = write_transcript(&dir, &lines);
+
+        let mut state = State::default();
+        let data = parse_transcript(Some(&path), &mut state);
+
+        assert_eq!(data.todos.len(), 3);
+        assert!(data.todos[0].completed);
+        assert!(!data.todos[1].completed);
+        assert!(!data.todos[2].completed);
+    }
+
+    #[test]
+    fn extract_target_variations() {
+        assert_eq!(
+            extract_target("Read", Some(&serde_json::json!({"file_path": "/foo/bar.rs"}))),
+            Some("bar.rs".to_string())
+        );
+        assert_eq!(
+            extract_target("Grep", Some(&serde_json::json!({"pattern": "TODO"}))),
+            Some("TODO".to_string())
+        );
+        assert_eq!(
+            extract_target(
+                "Bash",
+                Some(&serde_json::json!({"command": "cargo test --release --all"}))
+            ),
+            Some("cargo test --release --all".to_string())
+        );
+        let long_cmd = "a".repeat(50);
+        let result = extract_target("Bash", Some(&serde_json::json!({"command": long_cmd})));
+        assert!(result.unwrap().ends_with("..."));
+    }
 }

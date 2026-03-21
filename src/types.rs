@@ -48,7 +48,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct State {
     pub version: u32,
     pub byte_offset: u64,
