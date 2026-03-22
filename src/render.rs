@@ -35,11 +35,15 @@ fn format_duration(seconds: i64) -> String {
     }
     let minutes = seconds / 60;
     let hours = minutes / 60;
+    let days = hours / 24;
+    let remaining_hours = hours % 24;
     let remaining_minutes = minutes % 60;
-    if hours == 0 {
-        format!("{minutes}m")
-    } else {
+    if days > 0 {
+        format!("{days}d {remaining_hours}h")
+    } else if hours > 0 {
         format!("{hours}h {remaining_minutes}m")
+    } else {
+        format!("{minutes}m")
     }
 }
 
@@ -109,7 +113,11 @@ fn render_usage(usage: Option<&UsageInfo>, config: &Config) -> Vec<String> {
     if let Some(pct) = info.usage_7d {
         let pct_int = pct.round() as u8;
         let color = if pct > 80.0 { MAGENTA } else { BLUE };
-        let text = format!("7d {pct_int}%");
+        let reset_part = info
+            .reset_7d
+            .map(|s| format!(" ({})", format_duration(s)))
+            .unwrap_or_default();
+        let text = format!("7d {pct_int}%{reset_part}");
         if colors {
             parts.push(format!("{color}{text}{RESET}"));
         } else {
@@ -978,6 +986,7 @@ mod tests {
             usage_5h: Some(25.0),
             usage_7d: Some(60.0),
             reset_5h: Some(5400),
+            reset_7d: None,
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
         assert!(out.contains("5h 25% (1h 30m)"));
@@ -995,6 +1004,7 @@ mod tests {
             usage_5h: Some(10.0),
             usage_7d: None,
             reset_5h: None,
+            reset_7d: None,
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
         assert!(out.contains("5h 10%"));
@@ -1012,6 +1022,7 @@ mod tests {
             usage_5h: None,
             usage_7d: Some(40.0),
             reset_5h: None,
+            reset_7d: None,
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
         assert!(!out.contains("5h"));
@@ -1041,6 +1052,7 @@ mod tests {
             usage_5h: Some(25.0),
             usage_7d: Some(60.0),
             reset_5h: None,
+            reset_7d: None,
         };
         let out = render(&data, &Config::default(), &TranscriptData::default(), None, Some(&usage));
         assert!(out.contains(BLUE));
@@ -1058,6 +1070,7 @@ mod tests {
             usage_5h: Some(85.0),
             usage_7d: Some(90.0),
             reset_5h: None,
+            reset_7d: None,
         };
         let out = render(&data, &Config::default(), &TranscriptData::default(), None, Some(&usage));
         assert!(out.contains(MAGENTA));
@@ -1070,6 +1083,7 @@ mod tests {
             usage_5h: Some(25.0),
             usage_7d: Some(60.0),
             reset_5h: Some(5400),
+            reset_7d: None,
         };
         let transcript = TranscriptData {
             ..Default::default()
@@ -1114,6 +1128,7 @@ mod tests {
             usage_5h: Some(25.0),
             usage_7d: Some(60.0),
             reset_5h: Some(3600),
+            reset_7d: Some(259200),
         }
     }
 

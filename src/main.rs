@@ -22,10 +22,17 @@ fn usage_from_stdin(data: &types::StdinData) -> Option<UsageInfo> {
         .and_then(|w| w.resets_at)
         .map(|t| t - now)
         .filter(|&r| r > 0);
+    let reset_7d = rl
+        .seven_day
+        .as_ref()
+        .and_then(|w| w.resets_at)
+        .map(|t| t - now)
+        .filter(|&r| r > 0);
     Some(UsageInfo {
         usage_5h,
         usage_7d,
         reset_5h,
+        reset_7d,
     })
 }
 

@@ -26,6 +26,7 @@ pub struct UsageInfo {
     pub usage_5h: Option<f64>,
     pub usage_7d: Option<f64>,
     pub reset_5h: Option<i64>,
+    pub reset_7d: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
