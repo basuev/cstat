@@ -4,6 +4,12 @@ status line for claude code. parses claude's streaming json output and renders a
 
 ## install
 
+### from crates.io
+
+```
+cargo install cstat
+```
+
 ### from source
 
 ```
@@ -12,20 +18,15 @@ cargo install --git https://github.com/basuev/cstat
 
 ### binary download
 
-download the latest release from [GitHub Releases](https://github.com/basuev/cstat/releases/latest):
-
-| platform | architecture | binary |
-|----------|-------------|--------|
-| macOS | arm64 | `cstat-darwin-arm64` |
-| macOS | x86_64 | `cstat-darwin-amd64` |
-| Linux | x86_64 | `cstat-linux-amd64` |
-| Linux | arm64 | `cstat-linux-arm64` |
+grab a binary from [releases](https://github.com/basuev/cstat/releases/latest):
 
 ```sh
 curl -L -o cstat https://github.com/basuev/cstat/releases/latest/download/cstat-darwin-arm64
 chmod +x cstat
 mv cstat /usr/local/bin/
 ```
+
+available binaries: `cstat-darwin-arm64`, `cstat-darwin-amd64`, `cstat-linux-amd64`, `cstat-linux-arm64`.
 
 ## usage
 
