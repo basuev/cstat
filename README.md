@@ -30,11 +30,42 @@ available binaries: `cstat-darwin-arm64`, `cstat-darwin-amd64`, `cstat-linux-amd
 
 ## usage
 
-pipe claude code's json stream into cstat:
+### as claude code status line
+
+add to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "cstat"
+  }
+}
+```
+
+claude code will invoke cstat as a subprocess, piping session data to stdin. the status line updates automatically every ~300ms.
+
+### standalone
+
+pipe claude code's json stream into cstat directly:
 
 ```sh
 claude --output-format stream-json | cstat
 ```
+
+### what it shows
+
+line 1 (always):
+```
+[Opus] my-project  ctx 45%  5h 25% (1h30m)  7d 60%  12m
+```
+
+line 2 (when there's activity):
+```
+Edit auth.ts  Grep x3  Read x2  explore[haiku] 2m15s  tasks 3/7
+```
+
+includes: model name, project directory, context window usage, rate limits with cooldown, session duration, active tools, subagents, and task progress.
 
 ## configuration
 
