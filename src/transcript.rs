@@ -32,7 +32,6 @@ pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData
         state.agents.clear();
         state.todos.clear();
         state.tasks.clear();
-        state.session_start = None;
     }
 
     state.inode = inode;
@@ -54,14 +53,6 @@ pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData
             continue;
         };
 
-        if state.session_start.is_none() {
-            if let Some(ts) = entry.get("timestamp").and_then(|v| v.as_str()) {
-                if let Ok(dt) = ts.parse::<chrono::DateTime<chrono::Utc>>() {
-                    state.session_start = Some(dt.timestamp());
-                }
-            }
-        }
-
         let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match entry_type {
@@ -82,7 +73,6 @@ pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData
         agents: state.agents.clone(),
         todos: state.todos.clone(),
         tasks: state.tasks.clone(),
-        session_start: state.session_start,
     }
 }
 
@@ -509,21 +499,6 @@ mod tests {
         let mut state = State::default();
         let data = parse_transcript(Some(path.to_str().unwrap()), &mut state);
         assert_eq!(data.tools.len(), 1);
-    }
-
-    #[test]
-    fn session_start_extracted() {
-        let dir = tempfile::tempdir().unwrap();
-        let lines = vec![make_tool_use(
-            "t1",
-            "Read",
-            serde_json::json!({"file_path": "/a.rs"}),
-        )];
-        let path = write_transcript(&dir, &lines);
-
-        let mut state = State::default();
-        let data = parse_transcript(Some(&path), &mut state);
-        assert!(data.session_start.is_some());
     }
 
     #[test]
