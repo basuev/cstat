@@ -2,16 +2,10 @@ use std::collections::HashMap;
 
 use crate::git::GitInfo;
 use crate::types::{AgentEntry, Config, StdinData, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
-use crate::usage::UsageInfo;
+use crate::types::UsageInfo;
 
 fn context_percentage(data: &StdinData) -> Option<u8> {
-    let cw = data.context_window.as_ref()?;
-    let size = cw.context_window_size?;
-    let tokens = cw.current_usage.as_ref()?.input_tokens?;
-    if size == 0 {
-        return None;
-    }
-    Some(((tokens as f64 / size as f64) * 100.0) as u8)
+    data.context_window.as_ref()?.used_percentage
 }
 
 fn color_for_percentage(pct: u8, config: &Config) -> &'static str {
@@ -46,21 +40,6 @@ fn format_duration(seconds: i64) -> String {
         format!("{minutes}m")
     } else {
         format!("{hours}h {remaining_minutes}m")
-    }
-}
-
-fn render_duration(session_start: Option<i64>, colors: bool) -> Option<String> {
-    let start = session_start?;
-    let now = chrono::Utc::now().timestamp();
-    let elapsed = now - start;
-    if elapsed < 0 {
-        return None;
-    }
-    let text = format_duration(elapsed);
-    if colors {
-        Some(format!("{DIM}{text}{RESET}"))
-    } else {
-        Some(text)
     }
 }
 
@@ -274,10 +253,6 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
         line.push_str(&format!("{sep}{part}"));
     }
 
-    if let Some(dur) = render_duration(transcript.session_start, colors) {
-        line.push_str(&format!("{sep}{dur}"));
-    }
-
     let activity = render_activity_line(&transcript.tools, &transcript.agents, config);
     let tasks = render_tasks(&transcript.todos, &transcript.tasks, config);
 
@@ -300,19 +275,16 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentEntry, ContextWindow, CurrentUsage, Model, StdinData, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
+    use crate::types::{AgentEntry, ContextWindow, Model, StdinData, TaskItem, TaskStatus, TodoItem, ToolEntry, TranscriptData};
 
-    fn make_data(tokens: Option<u64>, window_size: Option<u64>) -> StdinData {
+    fn make_data(pct: Option<u8>) -> StdinData {
         StdinData {
             model: Some(Model {
                 display_name: Some("Opus".into()),
             }),
             cwd: Some("/home/user/my-project".into()),
             context_window: Some(ContextWindow {
-                current_usage: tokens.map(|t| CurrentUsage {
-                    input_tokens: Some(t),
-                }),
-                context_window_size: window_size,
+                used_percentage: pct,
             }),
             ..Default::default()
         }
@@ -348,7 +320,7 @@ mod tests {
 
     #[test]
     fn context_green_below_70() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[32mctx 45%\x1b[0m");
@@ -356,7 +328,7 @@ mod tests {
 
     #[test]
     fn context_yellow_at_70() {
-        let data = make_data(Some(70_000), Some(100_000));
+        let data = make_data(Some(70));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[33mctx 70%\x1b[0m");
@@ -364,7 +336,7 @@ mod tests {
 
     #[test]
     fn context_yellow_at_85() {
-        let data = make_data(Some(85_000), Some(100_000));
+        let data = make_data(Some(85));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[33mctx 85%\x1b[0m");
@@ -372,7 +344,7 @@ mod tests {
 
     #[test]
     fn context_red_above_85() {
-        let data = make_data(Some(86_000), Some(100_000));
+        let data = make_data(Some(86));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
         assert_eq!(out, "[Opus] my-project  \x1b[31mctx 86%\x1b[0m");
@@ -380,7 +352,7 @@ mod tests {
 
     #[test]
     fn context_no_colors() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let cfg = Config {
             colors: Some(false),
             ..Default::default()
@@ -402,19 +374,20 @@ mod tests {
 
     #[test]
     fn context_missing_tokens() {
-        let data = make_data(None, Some(100_000));
+        let data = make_data(None);
         assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
     }
 
     #[test]
-    fn context_zero_window_size() {
-        let data = make_data(Some(1000), Some(0));
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
+    fn context_zero_percentage() {
+        let data = make_data(Some(0));
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
+        assert_eq!(out, "[Opus] my-project  \x1b[32mctx 0%\x1b[0m");
     }
 
     #[test]
     fn context_custom_thresholds() {
-        let data = make_data(Some(55_000), Some(100_000));
+        let data = make_data(Some(55));
         let cfg = Config {
             context_warning: Some(50),
             context_critical: Some(60),
@@ -426,7 +399,7 @@ mod tests {
 
     #[test]
     fn context_integer_percentage() {
-        let data = make_data(Some(33_333), Some(100_000));
+        let data = make_data(Some(33));
         let cfg = Config {
             colors: Some(false),
             ..Default::default()
@@ -468,7 +441,7 @@ mod tests {
 
     #[test]
     fn custom_separator() {
-        let data = make_data(Some(10_000), Some(100_000));
+        let data = make_data(Some(10));
         let cfg = Config {
             colors: Some(false),
             separator: Some(" | ".into()),
@@ -480,7 +453,7 @@ mod tests {
 
     #[test]
     fn context_double_space_separator() {
-        let data = make_data(Some(10_000), Some(100_000));
+        let data = make_data(Some(10));
         let cfg = Config {
             colors: Some(false),
             ..Default::default()
@@ -833,7 +806,7 @@ mod tests {
 
     #[test]
     fn git_with_context() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "dev".into(), dirty: false };
         let cfg = Config { colors: Some(false), ..Default::default() };
         let out = render(&data, &cfg, &TranscriptData::default(), Some(&git), None);
@@ -859,49 +832,6 @@ mod tests {
         assert_eq!(format_duration(3600), "1h 0m");
         assert_eq!(format_duration(5400), "1h 30m");
         assert_eq!(format_duration(7200), "2h 0m");
-    }
-
-    #[test]
-    fn duration_displayed_on_first_line() {
-        let data = StdinData {
-            model: Some(Model { display_name: Some("Opus".into()) }),
-            cwd: Some("/tmp/proj".into()),
-            ..Default::default()
-        };
-        let start = chrono::Utc::now().timestamp() - 720;
-        let transcript = TranscriptData {
-            session_start: Some(start),
-            ..Default::default()
-        };
-        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        assert!(out.contains("12m"));
-    }
-
-    #[test]
-    fn duration_dim_with_colors() {
-        let data = StdinData {
-            model: Some(Model { display_name: Some("Opus".into()) }),
-            cwd: Some("/tmp/proj".into()),
-            ..Default::default()
-        };
-        let start = chrono::Utc::now().timestamp() - 300;
-        let transcript = TranscriptData {
-            session_start: Some(start),
-            ..Default::default()
-        };
-        let out = render(&data, &Config::default(), &transcript, None, None);
-        assert!(out.contains(&format!("{DIM}5m{RESET}")));
-    }
-
-    #[test]
-    fn duration_omitted_when_no_session_start() {
-        let data = StdinData {
-            model: Some(Model { display_name: Some("Opus".into()) }),
-            cwd: Some("/tmp/proj".into()),
-            ..Default::default()
-        };
-        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] proj");
     }
 
     #[test]
@@ -1135,22 +1065,19 @@ mod tests {
 
     #[test]
     fn usage_with_context_and_duration() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let usage = UsageInfo {
             usage_5h: Some(25.0),
             usage_7d: Some(60.0),
             reset_5h: Some(5400),
         };
-        let start = chrono::Utc::now().timestamp() - 720;
         let transcript = TranscriptData {
-            session_start: Some(start),
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, Some(&usage));
         assert!(out.contains("ctx 45%"));
         assert!(out.contains("5h 25%"));
         assert!(out.contains("7d 60%"));
-        assert!(out.contains("12m"));
     }
 
     fn full_transcript() -> TranscriptData {
@@ -1179,7 +1106,6 @@ mod tests {
                 TodoItem { content: "y".into(), completed: false },
             ],
             tasks,
-            session_start: Some(chrono::Utc::now().timestamp() - 600),
         }
     }
 
@@ -1193,7 +1119,7 @@ mod tests {
 
     #[test]
     fn all_data_present_no_colors() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: true };
         let usage = full_usage();
         let transcript = full_transcript();
@@ -1205,7 +1131,6 @@ mod tests {
         assert!(lines[0].contains("ctx 45%"));
         assert!(lines[0].contains("5h 25%"));
         assert!(lines[0].contains("7d 60%"));
-        assert!(lines[0].contains("10m"));
         assert!(lines[1].contains("Edit b.rs"));
         assert!(lines[1].contains("Read"));
         assert!(lines[1].contains("explore[haiku]"));
@@ -1214,7 +1139,7 @@ mod tests {
 
     #[test]
     fn all_data_present_with_colors() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: false };
         let usage = full_usage();
         let transcript = full_transcript();
@@ -1229,7 +1154,7 @@ mod tests {
 
     #[test]
     fn all_data_present_custom_separator() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: false };
         let usage = full_usage();
         let transcript = full_transcript();
@@ -1246,7 +1171,7 @@ mod tests {
 
     #[test]
     fn missing_git_only() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let usage = full_usage();
         let transcript = full_transcript();
         let out = render(&data, &no_colors_cfg(), &transcript, None, Some(&usage));
@@ -1273,7 +1198,7 @@ mod tests {
 
     #[test]
     fn missing_usage_only() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: false };
         let transcript = full_transcript();
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), None);
@@ -1285,11 +1210,10 @@ mod tests {
 
     #[test]
     fn missing_duration_only() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: false };
         let usage = full_usage();
         let transcript = TranscriptData {
-            session_start: None,
             ..full_transcript()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
@@ -1302,7 +1226,7 @@ mod tests {
 
     #[test]
     fn missing_activity_only() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: false };
         let usage = full_usage();
         let transcript = TranscriptData {
@@ -1310,7 +1234,6 @@ mod tests {
                 TodoItem { content: "x".into(), completed: true },
                 TodoItem { content: "y".into(), completed: false },
             ],
-            session_start: Some(chrono::Utc::now().timestamp() - 600),
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
@@ -1321,14 +1244,13 @@ mod tests {
 
     #[test]
     fn missing_tasks_only() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: false };
         let usage = full_usage();
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
         let transcript = TranscriptData {
             tools,
-            session_start: Some(chrono::Utc::now().timestamp() - 600),
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
@@ -1355,7 +1277,7 @@ mod tests {
 
     #[test]
     fn no_ansi_codes_when_colors_off() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let git = GitInfo { branch: "main".into(), dirty: true };
         let usage = full_usage();
         let transcript = full_transcript();
@@ -1372,7 +1294,7 @@ mod tests {
 
     #[test]
     fn output_no_trailing_newline() {
-        let data = make_data(Some(45_000), Some(100_000));
+        let data = make_data(Some(45));
         let transcript = full_transcript();
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
         assert!(!out.ends_with('\n'));
@@ -1407,26 +1329,15 @@ mod tests {
     }
 
     #[test]
-    fn render_duration_future_start_returns_none() {
-        let future = chrono::Utc::now().timestamp() + 1000;
-        assert!(render_duration(Some(future), false).is_none());
-    }
-
-    #[test]
-    fn render_duration_none_start_returns_none() {
-        assert!(render_duration(None, false).is_none());
-    }
-
-    #[test]
     fn context_percentage_none_when_no_context_window() {
         let data = StdinData::default();
         assert!(context_percentage(&data).is_none());
     }
 
     #[test]
-    fn context_percentage_none_when_no_size() {
-        let data = make_data(Some(1000), None);
-        assert!(context_percentage(&data).is_none());
+    fn context_percentage_returns_value() {
+        let data = make_data(Some(42));
+        assert_eq!(context_percentage(&data), Some(42));
     }
 
     #[test]

@@ -7,6 +7,25 @@ pub struct StdinData {
     pub context_window: Option<ContextWindow>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
+    pub rate_limits: Option<RateLimits>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RateLimits {
+    pub five_hour: Option<RateWindow>,
+    pub seven_day: Option<RateWindow>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RateWindow {
+    pub used_percentage: Option<f64>,
+    pub resets_at: Option<i64>,
+}
+
+pub struct UsageInfo {
+    pub usage_5h: Option<f64>,
+    pub usage_7d: Option<f64>,
+    pub reset_5h: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -16,13 +35,7 @@ pub struct Model {
 
 #[derive(Debug, Deserialize)]
 pub struct ContextWindow {
-    pub current_usage: Option<CurrentUsage>,
-    pub context_window_size: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CurrentUsage {
-    pub input_tokens: Option<u64>,
+    pub used_percentage: Option<u8>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -58,9 +71,7 @@ pub struct State {
     pub agents: HashMap<String, AgentEntry>,
     pub todos: Vec<TodoItem>,
     pub tasks: HashMap<String, TaskItem>,
-    pub session_start: Option<i64>,
     pub git_index_mtime: Option<i64>,
-    pub usage_cache: Option<UsageCache>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -98,14 +109,6 @@ pub struct TaskItem {
     pub status: TaskStatus,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UsageCache {
-    pub fetched_at: i64,
-    pub success: bool,
-    pub usage_5h: Option<f64>,
-    pub usage_7d: Option<f64>,
-    pub reset_5h: Option<i64>,
-}
 
 #[derive(Debug, Default)]
 pub struct TranscriptData {
@@ -113,5 +116,4 @@ pub struct TranscriptData {
     pub agents: HashMap<String, AgentEntry>,
     pub todos: Vec<TodoItem>,
     pub tasks: HashMap<String, TaskItem>,
-    pub session_start: Option<i64>,
 }
