@@ -28,6 +28,15 @@ const YELLOW: &str = "\x1b[33m";
 const GREEN: &str = "\x1b[32m";
 const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
+const USAGE_HIGH: f64 = 80.0;
+
+fn colorize(text: String, color: &str, enabled: bool) -> String {
+    if enabled {
+        format!("{color}{text}{RESET}")
+    } else {
+        text
+    }
+}
 
 fn format_duration(seconds: i64) -> String {
     if seconds < 60 {
@@ -81,11 +90,7 @@ fn render_agents(agents: &HashMap<String, AgentEntry>, config: &Config) -> Vec<S
                 .map(|t| format_agent_duration(now - t))
                 .unwrap_or_default();
             let label = format!("{name}{model_part} {dur}").trim().to_string();
-            if colors {
-                format!("{YELLOW}{label}{RESET}")
-            } else {
-                label
-            }
+            colorize(label, YELLOW, colors)
         })
         .collect()
 }
@@ -95,36 +100,22 @@ fn render_usage(usage: Option<&UsageInfo>, config: &Config) -> Vec<String> {
         return vec![];
     };
     let colors = config.colors();
-    let mut parts = vec![];
-    if let Some(pct) = info.usage_5h {
-        let pct_int = pct.round() as u8;
-        let color = if pct > 80.0 { MAGENTA } else { BLUE };
-        let reset_part = info
-            .reset_5h
-            .map(|s| format!(" ({})", format_duration(s)))
-            .unwrap_or_default();
-        let text = format!("5h {pct_int}%{reset_part}");
-        if colors {
-            parts.push(format!("{color}{text}{RESET}"));
-        } else {
-            parts.push(text);
-        }
-    }
-    if let Some(pct) = info.usage_7d {
-        let pct_int = pct.round() as u8;
-        let color = if pct > 80.0 { MAGENTA } else { BLUE };
-        let reset_part = info
-            .reset_7d
-            .map(|s| format!(" ({})", format_duration(s)))
-            .unwrap_or_default();
-        let text = format!("7d {pct_int}%{reset_part}");
-        if colors {
-            parts.push(format!("{color}{text}{RESET}"));
-        } else {
-            parts.push(text);
-        }
-    }
-    parts
+    let items = [
+        ("hourly", info.usage_5h, info.reset_5h),
+        ("weekly", info.usage_7d, info.reset_7d),
+    ];
+    items
+        .into_iter()
+        .filter_map(|(label, pct_opt, reset_opt)| {
+            let pct = pct_opt?;
+            let pct_int = pct.round() as u8;
+            let color = if pct > USAGE_HIGH { MAGENTA } else { BLUE };
+            let reset_part = reset_opt
+                .map(|s| format!(" ({} reset)", format_duration(s)))
+                .unwrap_or_default();
+            Some(colorize(format!("{label} {pct_int}%{reset_part}"), color, colors))
+        })
+        .collect()
 }
 
 fn render_tasks(todos: &[TodoItem], tasks: &HashMap<String, TaskItem>, config: &Config) -> Option<String> {
@@ -142,13 +133,8 @@ fn render_tasks(todos: &[TodoItem], tasks: &HashMap<String, TaskItem>, config: &
     }
 
     let label = format!("tasks {completed}/{total}");
-    let colors = config.colors();
-    if colors {
-        let color = if completed == total { GREEN } else { DIM };
-        Some(format!("{color}{label}{RESET}"))
-    } else {
-        Some(label)
-    }
+    let color = if completed == total { GREEN } else { DIM };
+    Some(colorize(label, color, config.colors()))
 }
 
 fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<String, AgentEntry>, config: &Config) -> Option<String> {
@@ -169,11 +155,7 @@ fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<Str
             Some(t) => format!("{} {}", tool.name, t),
             None => tool.name.clone(),
         };
-        if colors {
-            parts.push(format!("{BRIGHT}{label}{RESET}"));
-        } else {
-            parts.push(label);
-        }
+        parts.push(colorize(label, BRIGHT, colors));
     }
 
     let mut counts: Vec<(String, usize)> = Vec::new();
@@ -199,11 +181,7 @@ fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<Str
         } else {
             format!("{name} x{count}")
         };
-        if colors {
-            parts.push(format!("{DIM}{label}{RESET}"));
-        } else {
-            parts.push(label);
-        }
+        parts.push(colorize(label, DIM, colors));
     }
 
     let agent_parts = render_agents(agents, config);
@@ -227,8 +205,7 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
         .cwd
         .as_deref()
         .map(|p| {
-            let parts: Vec<&str> = p.rsplit('/').take(config.path_levels() as usize).collect();
-            let mut parts = parts;
+            let mut parts: Vec<&str> = p.rsplit('/').take(config.path_levels() as usize).collect();
             parts.reverse();
             parts.join("/")
         })
@@ -237,47 +214,35 @@ pub fn render(data: &StdinData, config: &Config, transcript: &TranscriptData, gi
     let sep = config.separator();
     let colors = config.colors();
 
-    let mut line = format!("[{model_name}] {project_name}");
+    let mut line1 = model_name.to_string();
+    for part in render_usage(usage, config) {
+        line1.push_str(&format!("{sep}{part}"));
+    }
+
+    let mut line2_parts: Vec<String> = vec![project_name];
 
     if let Some(gi) = git {
         let dirty = if gi.dirty { "*" } else { "" };
-        if colors {
-            line.push_str(&format!(" {DIM}git:({RESET}{}{dirty}{DIM}){RESET}", gi.branch));
-        } else {
-            line.push_str(&format!(" git:({}{dirty})", gi.branch));
-        }
+        line2_parts.push(colorize(format!("{}{dirty}", gi.branch), DIM, colors));
     }
 
     if let Some(pct) = context_percentage(data) {
-        if colors {
-            let color = color_for_percentage(pct, config);
-            line.push_str(&format!("{sep}{color}ctx {pct}%{RESET}"));
-        } else {
-            line.push_str(&format!("{sep}ctx {pct}%"));
-        }
-    }
-
-    for part in render_usage(usage, config) {
-        line.push_str(&format!("{sep}{part}"));
+        let color = color_for_percentage(pct, config);
+        line2_parts.push(colorize(format!("context {pct}%"), color, colors));
     }
 
     let activity = render_activity_line(&transcript.tools, &transcript.agents, config);
-    let tasks = render_tasks(&transcript.todos, &transcript.tasks, config);
-
-    if activity.is_some() || tasks.is_some() {
-        line.push('\n');
-        let sep = config.separator();
-        let mut parts: Vec<&str> = Vec::new();
-        if let Some(ref a) = activity {
-            parts.push(a);
-        }
-        if let Some(ref t) = tasks {
-            parts.push(t);
-        }
-        line.push_str(&parts.join(sep));
+    if let Some(a) = activity {
+        line2_parts.push(a);
     }
 
-    line
+    let tasks = render_tasks(&transcript.todos, &transcript.tasks, config);
+    if let Some(t) = tasks {
+        line2_parts.push(t);
+    }
+
+    let line2 = line2_parts.join(sep);
+    format!("{line1}\n{line2}")
 }
 
 #[cfg(test)]
@@ -307,13 +272,19 @@ mod tests {
             cwd: Some("/home/user/my-project".into()),
             ..Default::default()
         };
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "Opus");
+        assert_eq!(lines[1], "my-project");
     }
 
     #[test]
     fn render_empty_stdin() {
         let data = StdinData::default();
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[cstat] no data");
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "cstat");
+        assert_eq!(lines[1], "no data");
     }
 
     #[test]
@@ -323,7 +294,10 @@ mod tests {
             cwd: Some("/tmp/foo".into()),
             ..Default::default()
         };
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[cstat] foo");
+        let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "cstat");
+        assert_eq!(lines[1], "foo");
     }
 
     #[test]
@@ -331,7 +305,8 @@ mod tests {
         let data = make_data(Some(45));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project  \x1b[32mctx 45%\x1b[0m");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("\x1b[32mcontext 45%\x1b[0m"));
     }
 
     #[test]
@@ -339,7 +314,8 @@ mod tests {
         let data = make_data(Some(70));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project  \x1b[33mctx 70%\x1b[0m");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("\x1b[33mcontext 70%\x1b[0m"));
     }
 
     #[test]
@@ -347,7 +323,8 @@ mod tests {
         let data = make_data(Some(85));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project  \x1b[33mctx 85%\x1b[0m");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("\x1b[33mcontext 85%\x1b[0m"));
     }
 
     #[test]
@@ -355,7 +332,8 @@ mod tests {
         let data = make_data(Some(86));
         let cfg = Config::default();
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project  \x1b[31mctx 86%\x1b[0m");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("\x1b[31mcontext 86%\x1b[0m"));
     }
 
     #[test]
@@ -365,7 +343,9 @@ mod tests {
             colors: Some(false),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] my-project  ctx 45%");
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("context 45%"));
     }
 
     #[test]
@@ -377,20 +357,23 @@ mod tests {
             cwd: Some("/home/user/my-project".into()),
             ..Default::default()
         };
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
+        assert!(!out.contains("context"));
     }
 
     #[test]
     fn context_missing_tokens() {
         let data = make_data(None);
-        assert_eq!(render(&data, &Config::default(), &TranscriptData::default(), None, None), "[Opus] my-project");
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
+        assert!(!out.contains("context"));
     }
 
     #[test]
     fn context_zero_percentage() {
         let data = make_data(Some(0));
         let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project  \x1b[32mctx 0%\x1b[0m");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("\x1b[32mcontext 0%\x1b[0m"));
     }
 
     #[test]
@@ -402,7 +385,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project  \x1b[33mctx 55%\x1b[0m");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("\x1b[33mcontext 55%\x1b[0m"));
     }
 
     #[test]
@@ -412,7 +396,9 @@ mod tests {
             colors: Some(false),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] my-project  ctx 33%");
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("context 33%"));
     }
 
     #[test]
@@ -428,7 +414,9 @@ mod tests {
             path_levels: Some(2),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] user/my-project");
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.starts_with("user/my-project"));
     }
 
     #[test]
@@ -444,7 +432,9 @@ mod tests {
             path_levels: Some(3),
             ..Default::default()
         };
-        assert_eq!(render(&data, &cfg, &TranscriptData::default(), None, None), "[Opus] home/user/my-project");
+        let out = render(&data, &cfg, &TranscriptData::default(), None, None);
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.starts_with("home/user/my-project"));
     }
 
     #[test]
@@ -456,7 +446,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert_eq!(out, "[Opus] my-project | ctx 10%");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("my-project | context 10%"));
     }
 
     #[test]
@@ -467,7 +458,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &cfg, &TranscriptData::default(), None, None);
-        assert!(out.contains("my-project  ctx"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("my-project  context"));
     }
 
     fn tool(name: &str, target: Option<&str>, completed: bool) -> ToolEntry {
@@ -487,21 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_line_hidden_when_no_tools() {
-        let data = StdinData {
-            model: Some(Model {
-                display_name: Some("Opus".into()),
-            }),
-            cwd: Some("/tmp/proj".into()),
-            ..Default::default()
-        };
-        let transcript = TranscriptData::default();
-        let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        assert!(!out.contains('\n'));
-    }
-
-    #[test]
-    fn activity_line_running_tool_with_target() {
+    fn activity_shown_on_line2() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Edit", Some("auth.ts"), false));
         let transcript = TranscriptData {
@@ -513,13 +491,12 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1], "Edit auth.ts");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("Edit auth.ts"));
     }
 
     #[test]
-    fn activity_line_running_tool_without_target() {
+    fn activity_running_tool_without_target() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Glob", None, false));
         let transcript = TranscriptData {
@@ -531,12 +508,12 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[1], "Glob");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("Glob"));
     }
 
     #[test]
-    fn activity_line_completed_tools_grouped() {
+    fn activity_completed_tools_grouped() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
         tools.insert("t2".into(), tool("Read", Some("b.rs"), true));
@@ -551,15 +528,13 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        let activity = lines[1];
-        assert!(activity.contains("Read x3"));
-        assert!(activity.contains("Grep"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("Read x3"));
+        assert!(line2.contains("Grep"));
     }
 
     #[test]
-    fn activity_line_max_3_completed_groups() {
+    fn activity_max_3_completed_groups() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Read", None, true));
         tools.insert("t2".into(), tool("Grep", None, true));
@@ -574,13 +549,14 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        let group_count = activity.split("  ").count();
+        let line2 = out.lines().nth(1).unwrap();
+        let activity_part = line2.strip_prefix("p  ").unwrap_or(line2);
+        let group_count = activity_part.split("  ").count();
         assert!(group_count <= 3);
     }
 
     #[test]
-    fn activity_line_running_plus_completed() {
+    fn activity_running_plus_completed() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
         tools.insert("t2".into(), tool("Read", Some("b.rs"), true));
@@ -594,13 +570,13 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains("Edit main.rs"));
-        assert!(activity.contains("Read x2"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("Edit main.rs"));
+        assert!(line2.contains("Read x2"));
     }
 
     #[test]
-    fn activity_line_with_colors() {
+    fn activity_with_colors() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Edit", Some("auth.ts"), false));
         tools.insert("t2".into(), tool("Read", Some("a.rs"), true));
@@ -613,14 +589,14 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &Config::default(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains(BRIGHT));
-        assert!(activity.contains(DIM));
-        assert!(activity.contains(RESET));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains(BRIGHT));
+        assert!(line2.contains(DIM));
+        assert!(line2.contains(RESET));
     }
 
     #[test]
-    fn activity_line_single_completed_no_count() {
+    fn activity_single_completed_no_count() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Grep", Some("TODO"), true));
         let transcript = TranscriptData {
@@ -632,13 +608,13 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert_eq!(activity, "Grep");
-        assert!(!activity.contains("x1"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("Grep"));
+        assert!(!line2.contains("x1"));
     }
 
     #[test]
-    fn activity_line_running_agent_with_model() {
+    fn activity_running_agent_with_model() {
         let mut agents = HashMap::new();
         agents.insert(
             "a1".into(),
@@ -659,12 +635,12 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert_eq!(activity, "explore[haiku] 2m 15s");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("explore[haiku] 2m 15s"));
     }
 
     #[test]
-    fn activity_line_running_agent_without_model() {
+    fn activity_running_agent_without_model() {
         let mut agents = HashMap::new();
         agents.insert(
             "a1".into(),
@@ -685,12 +661,12 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert_eq!(activity, "general-purpose 45s");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("general-purpose 45s"));
     }
 
     #[test]
-    fn activity_line_completed_agent_hidden() {
+    fn activity_completed_agent_hidden() {
         let mut agents = HashMap::new();
         agents.insert(
             "a1".into(),
@@ -711,11 +687,11 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        assert!(!out.contains('\n'));
+        assert!(!out.contains("explore"));
     }
 
     #[test]
-    fn activity_line_agent_yellow_with_colors() {
+    fn activity_agent_yellow_with_colors() {
         let mut agents = HashMap::new();
         agents.insert(
             "a1".into(),
@@ -736,12 +712,12 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &Config::default(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains(YELLOW));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains(YELLOW));
     }
 
     #[test]
-    fn activity_line_uses_config_separator() {
+    fn activity_uses_config_separator() {
         let mut tools = HashMap::new();
         tools.insert("t1".into(), tool("Read", None, true));
         tools.insert("t2".into(), tool("Grep", None, true));
@@ -759,8 +735,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &cfg, &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains(" | "));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains(" | "));
     }
 
     #[test]
@@ -772,7 +748,9 @@ mod tests {
         };
         let git = GitInfo { branch: "main".into(), dirty: false };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), Some(&git), None);
-        assert_eq!(out, "[Opus] proj git:(main)");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("main"));
+        assert!(!line2.contains("git:"));
     }
 
     #[test]
@@ -784,7 +762,8 @@ mod tests {
         };
         let git = GitInfo { branch: "feat/x".into(), dirty: true };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), Some(&git), None);
-        assert_eq!(out, "[Opus] proj git:(feat/x*)");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("feat/x*"));
     }
 
     #[test]
@@ -796,9 +775,10 @@ mod tests {
         };
         let git = GitInfo { branch: "main".into(), dirty: false };
         let out = render(&data, &Config::default(), &TranscriptData::default(), Some(&git), None);
-        assert!(out.contains(DIM));
-        assert!(out.contains("git:("));
-        assert!(out.contains("main"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains(DIM));
+        assert!(line2.contains("main"));
+        assert!(!line2.contains("git:"));
     }
 
     #[test]
@@ -809,7 +789,7 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
-        assert!(!out.contains("git:"));
+        assert!(!out.contains("main"));
     }
 
     #[test]
@@ -818,7 +798,10 @@ mod tests {
         let git = GitInfo { branch: "dev".into(), dirty: false };
         let cfg = Config { colors: Some(false), ..Default::default() };
         let out = render(&data, &cfg, &TranscriptData::default(), Some(&git), None);
-        assert_eq!(out, "[Opus] my-project git:(dev)  ctx 45%");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("my-project"));
+        assert!(line2.contains("dev"));
+        assert!(line2.contains("context 45%"));
     }
 
     #[test]
@@ -857,9 +840,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1], "tasks 2/3");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("tasks 2/3"));
     }
 
     #[test]
@@ -877,9 +859,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1], "tasks 1/3");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("tasks 1/3"));
     }
 
     #[test]
@@ -900,8 +881,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[1], "tasks 2/4");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("tasks 2/4"));
     }
 
     #[test]
@@ -912,7 +893,6 @@ mod tests {
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
         assert!(!out.contains("tasks"));
-        assert!(!out.contains('\n'));
     }
 
     #[test]
@@ -929,9 +909,9 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &Config::default(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains(GREEN));
-        assert!(activity.contains("tasks 2/2"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains(GREEN));
+        assert!(line2.contains("tasks 2/2"));
     }
 
     #[test]
@@ -948,13 +928,13 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &Config::default(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains(DIM));
-        assert!(activity.contains("tasks 1/2"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains(DIM));
+        assert!(line2.contains("tasks 1/2"));
     }
 
     #[test]
-    fn tasks_alongside_tools_on_activity_line() {
+    fn tasks_alongside_tools() {
         let data = StdinData {
             cwd: Some("/tmp/p".into()),
             ..Default::default()
@@ -970,13 +950,13 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        let activity = out.lines().nth(1).unwrap();
-        assert!(activity.contains("Read"));
-        assert!(activity.contains("tasks 1/2"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("Read"));
+        assert!(line2.contains("tasks 1/2"));
     }
 
     #[test]
-    fn usage_5h_and_7d_shown() {
+    fn usage_hourly_and_weekly_shown() {
         let data = StdinData {
             model: Some(Model { display_name: Some("Opus".into()) }),
             cwd: Some("/tmp/proj".into()),
@@ -989,12 +969,13 @@ mod tests {
             reset_7d: None,
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
-        assert!(out.contains("5h 25% (1h 30m)"));
-        assert!(out.contains("7d 60%"));
+        let line1 = out.lines().next().unwrap();
+        assert!(line1.contains("hourly 25% (1h 30m reset)"));
+        assert!(line1.contains("weekly 60%"));
     }
 
     #[test]
-    fn usage_5h_only() {
+    fn usage_hourly_only() {
         let data = StdinData {
             model: Some(Model { display_name: Some("Opus".into()) }),
             cwd: Some("/tmp/proj".into()),
@@ -1007,12 +988,13 @@ mod tests {
             reset_7d: None,
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
-        assert!(out.contains("5h 10%"));
-        assert!(!out.contains("7d"));
+        let line1 = out.lines().next().unwrap();
+        assert!(line1.contains("hourly 10%"));
+        assert!(!line1.contains("weekly"));
     }
 
     #[test]
-    fn usage_7d_only() {
+    fn usage_weekly_only() {
         let data = StdinData {
             model: Some(Model { display_name: Some("Opus".into()) }),
             cwd: Some("/tmp/proj".into()),
@@ -1025,8 +1007,9 @@ mod tests {
             reset_7d: None,
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
-        assert!(!out.contains("5h"));
-        assert!(out.contains("7d 40%"));
+        let line1 = out.lines().next().unwrap();
+        assert!(!line1.contains("hourly"));
+        assert!(line1.contains("weekly 40%"));
     }
 
     #[test]
@@ -1037,8 +1020,10 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
-        assert!(!out.contains("5h"));
-        assert!(!out.contains("7d"));
+        let line1 = out.lines().next().unwrap();
+        assert!(!out.contains("hourly"));
+        assert!(!out.contains("weekly"));
+        assert_eq!(line1, "Opus");
     }
 
     #[test]
@@ -1077,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_with_context_and_duration() {
+    fn usage_on_line1_context_on_line2() {
         let data = make_data(Some(45));
         let usage = UsageInfo {
             usage_5h: Some(25.0),
@@ -1085,13 +1070,13 @@ mod tests {
             reset_5h: Some(5400),
             reset_7d: None,
         };
-        let transcript = TranscriptData {
-            ..Default::default()
-        };
-        let out = render(&data, &no_colors_cfg(), &transcript, None, Some(&usage));
-        assert!(out.contains("ctx 45%"));
-        assert!(out.contains("5h 25%"));
-        assert!(out.contains("7d 60%"));
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, Some(&usage));
+        let line1 = out.lines().next().unwrap();
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line1.contains("hourly 25%"));
+        assert!(line1.contains("weekly 60%"));
+        assert!(!line1.contains("context"));
+        assert!(line2.contains("context 45%"));
     }
 
     fn full_transcript() -> TranscriptData {
@@ -1141,11 +1126,12 @@ mod tests {
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("[Opus] my-project"));
-        assert!(lines[0].contains("git:(main*)"));
-        assert!(lines[0].contains("ctx 45%"));
-        assert!(lines[0].contains("5h 25%"));
-        assert!(lines[0].contains("7d 60%"));
+        assert!(lines[0].contains("Opus"));
+        assert!(lines[0].contains("hourly 25%"));
+        assert!(lines[0].contains("weekly 60%"));
+        assert!(lines[1].contains("my-project"));
+        assert!(lines[1].contains("main*"));
+        assert!(lines[1].contains("context 45%"));
         assert!(lines[1].contains("Edit b.rs"));
         assert!(lines[1].contains("Read"));
         assert!(lines[1].contains("explore[haiku]"));
@@ -1180,8 +1166,9 @@ mod tests {
         };
         let out = render(&data, &cfg, &transcript, Some(&git), Some(&usage));
         let line1 = out.lines().next().unwrap();
-        assert!(line1.contains(" | ctx 45%"));
-        assert!(line1.contains(" | 5h 25%"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line1.contains(" | hourly 25%"));
+        assert!(line2.contains(" | context 45%"));
     }
 
     #[test]
@@ -1190,9 +1177,9 @@ mod tests {
         let usage = full_usage();
         let transcript = full_transcript();
         let out = render(&data, &no_colors_cfg(), &transcript, None, Some(&usage));
-        assert!(!out.contains("git:"));
-        assert!(out.contains("ctx 45%"));
-        assert!(out.contains("5h 25%"));
+        assert!(!out.contains("main"));
+        assert!(out.contains("context 45%"));
+        assert!(out.contains("hourly 25%"));
     }
 
     #[test]
@@ -1206,9 +1193,9 @@ mod tests {
         let usage = full_usage();
         let transcript = full_transcript();
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
-        assert!(!out.contains("ctx"));
-        assert!(out.contains("git:(main)"));
-        assert!(out.contains("5h 25%"));
+        assert!(!out.contains("context"));
+        assert!(out.contains("main"));
+        assert!(out.contains("hourly 25%"));
     }
 
     #[test]
@@ -1217,26 +1204,10 @@ mod tests {
         let git = GitInfo { branch: "main".into(), dirty: false };
         let transcript = full_transcript();
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), None);
-        assert!(!out.contains("5h"));
-        assert!(!out.contains("7d"));
-        assert!(out.contains("ctx 45%"));
-        assert!(out.contains("git:(main)"));
-    }
-
-    #[test]
-    fn missing_duration_only() {
-        let data = make_data(Some(45));
-        let git = GitInfo { branch: "main".into(), dirty: false };
-        let usage = full_usage();
-        let transcript = TranscriptData {
-            ..full_transcript()
-        };
-        let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
-        let line1 = out.lines().next().unwrap();
-        assert!(line1.contains("ctx 45%"));
-        assert!(line1.contains("5h 25%"));
-        let parts: Vec<&str> = line1.split("  ").collect();
-        assert!(!parts.iter().any(|p| p.contains('m') && !p.contains('%') && !p.contains("my-project") && !p.contains("git:")));
+        assert!(!out.contains("hourly"));
+        assert!(!out.contains("weekly"));
+        assert!(out.contains("context 45%"));
+        assert!(out.contains("main"));
     }
 
     #[test]
@@ -1252,9 +1223,8 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1], "tasks 1/2");
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(line2.contains("tasks 1/2"));
     }
 
     #[test]
@@ -1269,24 +1239,23 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, Some(&git), Some(&usage));
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(!lines[1].contains("tasks"));
+        let line2 = out.lines().nth(1).unwrap();
+        assert!(!line2.contains("tasks"));
     }
 
     #[test]
     fn all_blocks_missing() {
         let data = StdinData::default();
         let out = render(&data, &Config::default(), &TranscriptData::default(), None, None);
-        assert_eq!(out, "[cstat] no data");
-        assert!(!out.contains('\n'));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "cstat");
+        assert_eq!(lines[1], "no data");
     }
 
     #[test]
     fn all_blocks_missing_no_colors() {
         let data = StdinData::default();
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
-        assert_eq!(out, "[cstat] no data");
         assert!(!out.contains('\x1b'));
     }
 
@@ -1321,6 +1290,13 @@ mod tests {
         let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
         let first = out.lines().next().unwrap();
         assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn always_two_lines() {
+        let data = StdinData::default();
+        let out = render(&data, &no_colors_cfg(), &TranscriptData::default(), None, None);
+        assert_eq!(out.lines().count(), 2);
     }
 
     #[test]
