@@ -2,6 +2,8 @@
 
 status line for claude code. parses claude's streaming json output and renders a compact status bar with session info, usage, active tools, agents, and task progress.
 
+![screenshot](assets/screenshot.png)
+
 ## install
 
 ### from crates.io
