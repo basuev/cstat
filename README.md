@@ -55,17 +55,17 @@ claude --output-format stream-json | cstat
 
 ### what it shows
 
-line 1 (always):
+line 1 (model + rate limits):
 ```
-[Opus] my-project  ctx 45%  5h 25% (1h30m)  7d 60%  12m
-```
-
-line 2 (when there's activity):
-```
-Edit auth.ts  Grep x3  Read x2  explore[haiku] 2m15s  tasks 3/7
+Opus  hourly 25% (1h30m reset)  weekly 60%
 ```
 
-includes: model name, project directory, context window usage, rate limits with cooldown, session duration, active tools, subagents, and task progress.
+line 2 (project + context + activity):
+```
+my-project  main*  context 45%  Edit auth.ts  Grep x3  explore[haiku] 2m15s  tasks 3/7
+```
+
+includes: model name, rate limits with reset timer, project directory, git branch, context window usage, active tools, subagents, and task progress.
 
 ## configuration
 
