@@ -138,11 +138,11 @@ fn render_tasks(todos: &[TodoItem], tasks: &HashMap<String, TaskItem>, config: &
 }
 
 fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<String, AgentEntry>, config: &Config) -> Option<String> {
-    let running: Vec<&ToolEntry> = tools.values().filter(|t| !t.completed).collect();
+    let last_running = tools.values().filter(|t| !t.completed).last();
     let completed: Vec<&ToolEntry> = tools.values().filter(|t| t.completed).collect();
     let has_running_agents = agents.values().any(|a| !a.completed);
 
-    if running.is_empty() && completed.is_empty() && !has_running_agents {
+    if last_running.is_none() && completed.is_empty() && !has_running_agents {
         return None;
     }
 
@@ -150,7 +150,7 @@ fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<Str
     let colors = config.colors();
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(tool) = running.last() {
+    if let Some(tool) = last_running {
         let label = match &tool.target {
             Some(t) => format!("{} {}", tool.name, t),
             None => tool.name.clone(),

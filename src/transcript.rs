@@ -145,7 +145,7 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                             .unwrap_or("pending");
                         Some(TodoItem {
                             content: content.to_string(),
-                            completed: normalize_status(status) == "completed",
+                            completed: parse_status(status) == TaskStatus::Completed,
                         })
                     })
                     .collect();
@@ -158,7 +158,7 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
             state.tasks.insert(
                 id.to_string(),
                 TaskItem {
-                    status: parse_task_status(status),
+                    status: parse_status(status),
                 },
             );
         } else if name == "TaskUpdate" {
@@ -170,7 +170,7 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                 .and_then(|v| v.as_str());
             if let (Some(task_id), Some(status)) = (task_id, status) {
                 if let Some(task) = state.tasks.get_mut(task_id) {
-                    task.status = parse_task_status(status);
+                    task.status = parse_status(status);
                 }
             }
         } else {
@@ -221,23 +221,11 @@ fn parse_tool_results(entry: &Value, state: &mut State) {
 
 fn extract_target(name: &str, input: Option<&Value>) -> Option<String> {
     let input = input?;
+    let get_str = |key: &str| input.get(key).and_then(|v| v.as_str());
     match name {
-        "Read" | "Write" | "Edit" => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|p| short_path(p)),
-        "Glob" => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        "Grep" => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        "Bash" => input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|s| truncate(s, 30)),
+        "Read" | "Write" | "Edit" => get_str("file_path").map(short_path),
+        "Glob" | "Grep" => get_str("pattern").map(|s| s.to_string()),
+        "Bash" => get_str("command").map(|s| truncate(s, 30)),
         _ => None,
     }
 }
@@ -254,18 +242,10 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn normalize_status(status: &str) -> &str {
+fn parse_status(status: &str) -> TaskStatus {
     match status {
-        "completed" | "complete" | "done" => "completed",
-        "in_progress" | "running" => "in_progress",
-        _ => "pending",
-    }
-}
-
-fn parse_task_status(status: &str) -> TaskStatus {
-    match normalize_status(status) {
-        "completed" => TaskStatus::Completed,
-        "in_progress" => TaskStatus::InProgress,
+        "completed" | "complete" | "done" => TaskStatus::Completed,
+        "in_progress" | "running" => TaskStatus::InProgress,
         _ => TaskStatus::Pending,
     }
 }
@@ -633,14 +613,14 @@ mod tests {
     }
 
     #[test]
-    fn status_normalization() {
-        assert_eq!(normalize_status("pending"), "pending");
-        assert_eq!(normalize_status("not_started"), "pending");
-        assert_eq!(normalize_status("in_progress"), "in_progress");
-        assert_eq!(normalize_status("running"), "in_progress");
-        assert_eq!(normalize_status("completed"), "completed");
-        assert_eq!(normalize_status("complete"), "completed");
-        assert_eq!(normalize_status("done"), "completed");
+    fn status_parsing() {
+        assert_eq!(parse_status("pending"), TaskStatus::Pending);
+        assert_eq!(parse_status("not_started"), TaskStatus::Pending);
+        assert_eq!(parse_status("in_progress"), TaskStatus::InProgress);
+        assert_eq!(parse_status("running"), TaskStatus::InProgress);
+        assert_eq!(parse_status("completed"), TaskStatus::Completed);
+        assert_eq!(parse_status("complete"), TaskStatus::Completed);
+        assert_eq!(parse_status("done"), TaskStatus::Completed);
     }
 
     #[test]

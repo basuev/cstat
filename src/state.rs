@@ -30,13 +30,12 @@ pub fn load_state(transcript_path: Option<&str>) -> State {
     }
 }
 
-pub fn save_state(state: &State, transcript_path: Option<&str>) {
+pub fn save_state(state: &mut State, transcript_path: Option<&str>) {
     let Some(tp) = transcript_path else {
         return;
     };
 
     let path = state_path(tp);
-    let mut state = state.clone();
     state.version = STATE_VERSION;
 
     if let Ok(data) = bincode::serialize(&state) {
@@ -78,7 +77,7 @@ mod tests {
         let mut state = State::default();
         state.byte_offset = 42;
         state.inode = 123;
-        save_state(&state, Some(tp_str));
+        save_state(&mut state, Some(tp_str));
 
         let loaded = load_state(Some(tp_str));
         assert_eq!(loaded.version, STATE_VERSION);

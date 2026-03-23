@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct GitInfo {
     pub branch: String,
@@ -19,7 +19,7 @@ fn find_git_dir(cwd: &str) -> Option<PathBuf> {
     }
 }
 
-fn read_branch(git_dir: &PathBuf) -> Option<String> {
+fn read_branch(git_dir: &Path) -> Option<String> {
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     if let Some(refpath) = head.strip_prefix("ref: refs/heads/") {
@@ -31,7 +31,7 @@ fn read_branch(git_dir: &PathBuf) -> Option<String> {
     }
 }
 
-fn index_mtime(git_dir: &PathBuf) -> Option<i64> {
+fn index_mtime(git_dir: &Path) -> Option<i64> {
     let meta = fs::metadata(git_dir.join("index")).ok()?;
     let mtime = meta.modified().ok()?;
     let duration = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;

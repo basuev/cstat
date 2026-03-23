@@ -8,6 +8,10 @@ mod types;
 
 use types::UsageInfo;
 
+fn secs_until_reset(window: Option<&types::RateWindow>, now: i64) -> Option<i64> {
+    window?.resets_at.map(|t| t - now).filter(|&r| r > 0)
+}
+
 fn usage_from_stdin(data: &types::StdinData) -> Option<UsageInfo> {
     let rl = data.rate_limits.as_ref()?;
     let usage_5h = rl.five_hour.as_ref().and_then(|w| w.used_percentage);
@@ -16,23 +20,11 @@ fn usage_from_stdin(data: &types::StdinData) -> Option<UsageInfo> {
         return None;
     }
     let now = chrono::Utc::now().timestamp();
-    let reset_5h = rl
-        .five_hour
-        .as_ref()
-        .and_then(|w| w.resets_at)
-        .map(|t| t - now)
-        .filter(|&r| r > 0);
-    let reset_7d = rl
-        .seven_day
-        .as_ref()
-        .and_then(|w| w.resets_at)
-        .map(|t| t - now)
-        .filter(|&r| r > 0);
     Some(UsageInfo {
         usage_5h,
         usage_7d,
-        reset_5h,
-        reset_7d,
+        reset_5h: secs_until_reset(rl.five_hour.as_ref(), now),
+        reset_7d: secs_until_reset(rl.seven_day.as_ref(), now),
     })
 }
 
@@ -49,5 +41,5 @@ fn main() {
     let usage = usage_from_stdin(&data);
     let output = render::render(&data, &config, &transcript_data, git_info, usage.as_ref());
     println!("{output}");
-    state::save_state(&st, data.transcript_path.as_deref());
+    state::save_state(&mut st, data.transcript_path.as_deref());
 }
