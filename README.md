@@ -1,21 +1,47 @@
 # cstat
 
-status line for claude code. parses claude's streaming json output and renders a compact status bar with session info, usage, active tools, agents, and task progress.
+[![crates.io](https://img.shields.io/crates/v/cstat.svg)](https://crates.io/crates/cstat)
+[![downloads](https://img.shields.io/crates/d/cstat.svg)](https://crates.io/crates/cstat)
+[![license](https://img.shields.io/crates/l/cstat.svg)](LICENSE)
+
+a fast, native status line for claude code. written in rust. single binary, zero runtime dependencies, sub-millisecond startup.
+
+```
+brew install basuev/cstat/cstat
+```
 
 ![screenshot](assets/screenshot.png)
 
+## why cstat
+
+|  | cstat | claude-hud |
+|---|---|---|
+| language | rust | bash + jq |
+| execution time | **2ms** | **62ms** (33x slower) |
+| subprocess spawns | 0 | 24 (jq, git, grep, date...) |
+| binary size | 994K | 56K (but requires jq, git, coreutils) |
+| runtime deps | none | bash, jq, git, ccusage |
+| standalone mode | yes | no |
+| rate limit reset timers | yes | no |
+| incremental transcript parsing | yes (mmap) | no |
+| platforms | macOS + Linux (arm64/x86) | macOS + Linux |
+
+cstat is invoked by claude code every ~300ms. at that frequency, execution time matters: claude-hud spawns 24 subprocesses on each call, cstat spawns zero.
+
+> benchmarked with [hyperfine](https://github.com/sharkdp/hyperfine) on Apple M3 Pro, 50 runs each.
+
 ## install
+
+### homebrew (macOS)
+
+```
+brew install basuev/cstat/cstat
+```
 
 ### from crates.io
 
 ```
 cargo install cstat
-```
-
-### from source
-
-```
-cargo install --git https://github.com/basuev/cstat
 ```
 
 ### binary download
@@ -30,9 +56,13 @@ mv cstat /usr/local/bin/
 
 available binaries: `cstat-darwin-arm64`, `cstat-darwin-amd64`, `cstat-linux-amd64`, `cstat-linux-arm64`.
 
-## usage
+### from source
 
-### as claude code status line
+```
+cargo install --git https://github.com/basuev/cstat
+```
+
+## usage
 
 add to `~/.claude/settings.json`:
 
@@ -59,7 +89,7 @@ claude --output-format stream-json | cstat
 
 line 1 (model + rate limits):
 ```
-Opus  hourly 25% (1h30m reset)  weekly 60%
+Opus 4.6 (1M context)  hourly 25% (1h30m reset)  weekly 60%
 ```
 
 line 2 (project + context + activity):
