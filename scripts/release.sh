@@ -13,47 +13,39 @@ if ! command -v cargo &>/dev/null; then
   exit 1
 fi
 
-TARGETS=(
-  aarch64-apple-darwin:cstat-darwin-arm64
-  x86_64-apple-darwin:cstat-darwin-amd64
-  x86_64-unknown-linux-musl:cstat-linux-amd64
-  aarch64-unknown-linux-musl:cstat-linux-arm64
-)
+if ! docker info &>/dev/null; then
+  echo "error: docker required for linux builds" >&2
+  exit 1
+fi
 
 ARTIFACTS=()
 DIST="target/dist"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-for entry in "${TARGETS[@]}"; do
-  target="${entry%%:*}"
-  name="${entry##*:}"
+echo "build: aarch64-apple-darwin -> cstat-darwin-arm64"
+cargo build --release --target aarch64-apple-darwin
+cp target/aarch64-apple-darwin/release/cstat "${DIST}/cstat-darwin-arm64"
+ARTIFACTS+=("${DIST}/cstat-darwin-arm64")
 
-  if ! rustup target list --installed | grep -q "^${target}$"; then
-    echo "skip: ${target} (not installed, run: rustup target add ${target})" >&2
-    continue
-  fi
+echo "build: x86_64-apple-darwin -> cstat-darwin-amd64"
+cargo build --release --target x86_64-apple-darwin
+cp target/x86_64-apple-darwin/release/cstat "${DIST}/cstat-darwin-amd64"
+ARTIFACTS+=("${DIST}/cstat-darwin-amd64")
 
-  USE_CROSS=false
-  if [[ "$target" == *linux-musl* ]] && command -v cross &>/dev/null; then
-    USE_CROSS=true
-  fi
+echo "build: x86_64-unknown-linux-musl -> cstat-linux-amd64"
+docker run --rm --platform linux/amd64 -v "$(pwd)":/src -w /src \
+  messense/rust-musl-cross:x86_64-musl \
+  cargo build --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/cstat "${DIST}/cstat-linux-amd64"
+ARTIFACTS+=("${DIST}/cstat-linux-amd64")
 
-  echo "build: ${target} -> ${name}"
-  if $USE_CROSS; then
-    cross build --release --target "$target"
-  else
-    cargo build --release --target "$target"
-  fi
-
-  cp "target/${target}/release/cstat" "${DIST}/${name}"
-  ARTIFACTS+=("${DIST}/${name}")
-done
-
-if [ ${#ARTIFACTS[@]} -eq 0 ]; then
-  echo "error: no artifacts built" >&2
-  exit 1
-fi
+echo "build: aarch64-unknown-linux-musl -> cstat-linux-arm64"
+docker run --rm --platform linux/arm64 -v "$(pwd)":/src -w /src \
+  messense/rust-musl-cross:aarch64-musl \
+  cargo build --release --target aarch64-unknown-linux-musl
+cp target/aarch64-unknown-linux-musl/release/cstat "${DIST}/cstat-linux-arm64"
+ARTIFACTS+=("${DIST}/cstat-linux-arm64")
 
 echo ""
 echo "artifacts:"
