@@ -10,7 +10,7 @@ a fast, native status line for claude code. written in rust. single binary, zero
 brew install basuev/cstat/cstat
 ```
 
-![screenshot](assets/screenshot.png)
+![demo](demo.gif)
 
 ## why cstat
 
