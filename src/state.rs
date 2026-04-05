@@ -3,9 +3,10 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-use crate::types::State;
+use crate::types::{CachedRateLimits, State};
 
 const STATE_VERSION: u32 = 2;
+const GLOBAL_RATE_LIMITS_PATH: &str = "/tmp/cstat-rate-limits.bin";
 
 fn state_path(transcript_path: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
@@ -31,6 +32,10 @@ pub fn load_state(transcript_path: Option<&str>) -> State {
 }
 
 pub fn save_state(state: &mut State, transcript_path: Option<&str>) {
+    if let Some(ref cached) = state.cached_rate_limits {
+        save_global_rate_limits(cached);
+    }
+
     let Some(tp) = transcript_path else {
         return;
     };
@@ -40,6 +45,17 @@ pub fn save_state(state: &mut State, transcript_path: Option<&str>) {
 
     if let Ok(data) = bincode::serialize(&state) {
         let _ = fs::write(&path, data);
+    }
+}
+
+pub fn load_global_rate_limits() -> Option<CachedRateLimits> {
+    let data = fs::read(GLOBAL_RATE_LIMITS_PATH).ok()?;
+    bincode::deserialize(&data).ok()
+}
+
+fn save_global_rate_limits(cached: &CachedRateLimits) {
+    if let Ok(data) = bincode::serialize(cached) {
+        let _ = fs::write(GLOBAL_RATE_LIMITS_PATH, data);
     }
 }
 

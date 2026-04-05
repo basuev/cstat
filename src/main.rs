@@ -60,7 +60,16 @@ fn main() {
             st.cached_rate_limits = Some(cache);
             Some(info)
         }
-        None => st.cached_rate_limits.as_ref().and_then(usage_from_cache),
+        None => st
+            .cached_rate_limits
+            .as_ref()
+            .and_then(usage_from_cache)
+            .or_else(|| {
+                let global = state::load_global_rate_limits()?;
+                let info = usage_from_cache(&global)?;
+                st.cached_rate_limits = Some(global);
+                Some(info)
+            }),
     };
     let output = render::render(&data, &config, &transcript_data, git_info, usage.as_ref());
     println!("{output}");
