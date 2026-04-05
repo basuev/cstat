@@ -6,25 +6,42 @@ mod stdin;
 mod transcript;
 mod types;
 
-use types::UsageInfo;
+use types::{CachedRateLimits, UsageInfo};
 
-fn secs_until_reset(window: Option<&types::RateWindow>, now: i64) -> Option<i64> {
-    window?.resets_at.map(|t| t - now).filter(|&r| r > 0)
+fn reset_secs(resets_at: Option<i64>, now: i64) -> Option<i64> {
+    resets_at.map(|t| t - now).filter(|&r| r > 0)
 }
 
-fn usage_from_stdin(data: &types::StdinData) -> Option<UsageInfo> {
+fn usage_from_stdin(data: &types::StdinData) -> Option<(UsageInfo, CachedRateLimits)> {
     let rl = data.rate_limits.as_ref()?;
     let usage_5h = rl.five_hour.as_ref().and_then(|w| w.used_percentage);
     let usage_7d = rl.seven_day.as_ref().and_then(|w| w.used_percentage);
     if usage_5h.is_none() && usage_7d.is_none() {
         return None;
     }
+    let resets_at_5h = rl.five_hour.as_ref().and_then(|w| w.resets_at);
+    let resets_at_7d = rl.seven_day.as_ref().and_then(|w| w.resets_at);
     let now = chrono::Utc::now().timestamp();
-    Some(UsageInfo {
+    let usage = UsageInfo {
         usage_5h,
         usage_7d,
-        reset_5h: secs_until_reset(rl.five_hour.as_ref(), now),
-        reset_7d: secs_until_reset(rl.seven_day.as_ref(), now),
+        reset_5h: reset_secs(resets_at_5h, now),
+        reset_7d: reset_secs(resets_at_7d, now),
+    };
+    let cache = CachedRateLimits { usage_5h, usage_7d, resets_at_5h, resets_at_7d };
+    Some((usage, cache))
+}
+
+fn usage_from_cache(cached: &CachedRateLimits) -> Option<UsageInfo> {
+    if cached.usage_5h.is_none() && cached.usage_7d.is_none() {
+        return None;
+    }
+    let now = chrono::Utc::now().timestamp();
+    Some(UsageInfo {
+        usage_5h: cached.usage_5h,
+        usage_7d: cached.usage_7d,
+        reset_5h: reset_secs(cached.resets_at_5h, now),
+        reset_7d: reset_secs(cached.resets_at_7d, now),
     })
 }
 
@@ -38,7 +55,13 @@ fn main() {
     if let Some((_, mtime)) = &git {
         st.git_index_mtime = Some(*mtime);
     }
-    let usage = usage_from_stdin(&data);
+    let usage = match usage_from_stdin(&data) {
+        Some((info, cache)) => {
+            st.cached_rate_limits = Some(cache);
+            Some(info)
+        }
+        None => st.cached_rate_limits.as_ref().and_then(usage_from_cache),
+    };
     let output = render::render(&data, &config, &transcript_data, git_info, usage.as_ref());
     println!("{output}");
     state::save_state(&mut st, data.transcript_path.as_deref());

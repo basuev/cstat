@@ -29,6 +29,14 @@ pub struct UsageInfo {
     pub reset_7d: Option<i64>,
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CachedRateLimits {
+    pub usage_5h: Option<f64>,
+    pub usage_7d: Option<f64>,
+    pub resets_at_5h: Option<i64>,
+    pub resets_at_7d: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Model {
     pub display_name: Option<String>,
@@ -73,6 +81,7 @@ pub struct State {
     pub todos: Vec<TodoItem>,
     pub tasks: HashMap<String, TaskItem>,
     pub git_index_mtime: Option<i64>,
+    pub cached_rate_limits: Option<CachedRateLimits>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

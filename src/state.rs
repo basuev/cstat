@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::types::State;
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 fn state_path(transcript_path: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
