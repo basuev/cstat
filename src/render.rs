@@ -69,32 +69,6 @@ fn format_agent_duration(seconds: i64) -> String {
     }
 }
 
-fn render_agents(agents: &HashMap<String, AgentEntry>, config: &Config) -> Vec<String> {
-    let now = chrono::Utc::now().timestamp();
-    let colors = config.colors();
-    agents
-        .values()
-        .filter(|a| !a.completed)
-        .map(|a| {
-            let name = a
-                .subagent_type
-                .as_deref()
-                .unwrap_or("agent");
-            let model_part = a
-                .model
-                .as_ref()
-                .map(|m| format!("[{m}]"))
-                .unwrap_or_default();
-            let dur = a
-                .start_time
-                .map(|t| format_agent_duration(now - t))
-                .unwrap_or_default();
-            let label = format!("{name}{model_part} {dur}").trim().to_string();
-            colorize(label, YELLOW, colors)
-        })
-        .collect()
-}
-
 fn render_usage(usage: Option<&UsageInfo>, config: &Config) -> Vec<String> {
     let Some(info) = usage else {
         return vec![];
@@ -137,55 +111,98 @@ fn render_tasks(todos: &[TodoItem], tasks: &HashMap<String, TaskItem>, config: &
     Some(colorize(label, color, config.colors()))
 }
 
-fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<String, AgentEntry>, config: &Config) -> Option<String> {
-    let last_running = tools.values().filter(|t| !t.completed).last();
-    let completed: Vec<&ToolEntry> = tools.values().filter(|t| t.completed).collect();
-    let has_running_agents = agents.values().any(|a| !a.completed);
+enum TimelineKind {
+    Tool,
+    Agent,
+}
 
-    if last_running.is_none() && completed.is_empty() && !has_running_agents {
+struct TimelineItem<'a> {
+    kind: TimelineKind,
+    name: &'a str,
+    target: Option<&'a str>,
+    seq: u64,
+    completed: bool,
+    start_time: Option<i64>,
+    model: Option<&'a str>,
+}
+
+fn render_activity_line(tools: &HashMap<String, ToolEntry>, agents: &HashMap<String, AgentEntry>, config: &Config) -> Option<String> {
+    let mut items: Vec<TimelineItem> = Vec::new();
+
+    for t in tools.values() {
+        items.push(TimelineItem {
+            kind: TimelineKind::Tool,
+            name: &t.name,
+            target: t.target.as_deref(),
+            seq: t.seq,
+            completed: t.completed,
+            start_time: None,
+            model: None,
+        });
+    }
+
+    for a in agents.values() {
+        items.push(TimelineItem {
+            kind: TimelineKind::Agent,
+            name: a.subagent_type.as_deref().unwrap_or("agent"),
+            target: a.description.as_deref(),
+            seq: a.seq,
+            completed: a.completed,
+            start_time: a.start_time,
+            model: a.model.as_deref(),
+        });
+    }
+
+    if items.is_empty() {
         return None;
     }
+
+    items.sort_by_key(|i| i.seq);
 
     let sep = config.separator();
     let colors = config.colors();
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(tool) = last_running {
-        let label = match &tool.target {
-            Some(t) => format!("{} {}", tool.name, t),
-            None => tool.name.clone(),
-        };
-        parts.push(colorize(label, BRIGHT, colors));
-    }
+    let (completed, running): (Vec<_>, Vec<_>) = items.iter().partition(|i| i.completed);
 
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    {
-        let mut map: HashMap<&str, usize> = HashMap::new();
-        let mut order: Vec<&str> = Vec::new();
-        for t in &completed {
-            let n = t.name.as_str();
-            let count = map.entry(n).or_insert(0);
-            if *count == 0 {
-                order.push(n);
+    let mut groups: Vec<(&str, usize)> = Vec::new();
+    for item in &completed {
+        if let Some(last) = groups.last_mut() {
+            if last.0 == item.name {
+                last.1 += 1;
+                continue;
             }
-            *count += 1;
         }
-        for name in order {
-            counts.push((name.to_string(), map[name]));
-        }
+        groups.push((item.name, 1));
     }
 
-    for (name, count) in counts.iter().rev().take(3).rev() {
-        let label = if *count == 1 {
-            name.clone()
+    for &(name, count) in groups.iter().rev().take(3).rev() {
+        let label = if count == 1 {
+            name.to_string()
         } else {
             format!("{name} x{count}")
         };
         parts.push(colorize(label, DIM, colors));
     }
 
-    let agent_parts = render_agents(agents, config);
-    parts.extend(agent_parts);
+    let now = chrono::Utc::now().timestamp();
+    for item in &running {
+        match item.kind {
+            TimelineKind::Tool => {
+                let label = match item.target {
+                    Some(t) => format!("{} {t}", item.name),
+                    None => item.name.to_string(),
+                };
+                parts.push(colorize(label, BRIGHT, colors));
+            }
+            TimelineKind::Agent => {
+                let model_part = item.model.map(|m| format!("[{m}]")).unwrap_or_default();
+                let dur = item.start_time.map(|t| format_agent_duration(now - t)).unwrap_or_default();
+                let label = format!("{}{model_part} {dur}", item.name).trim().to_string();
+                parts.push(colorize(label, YELLOW, colors));
+            }
+        }
+    }
 
     if parts.is_empty() {
         return None;
@@ -463,11 +480,16 @@ mod tests {
     }
 
     fn tool(name: &str, target: Option<&str>, completed: bool) -> ToolEntry {
+        tool_seq(name, target, completed, 0)
+    }
+
+    fn tool_seq(name: &str, target: Option<&str>, completed: bool, seq: u64) -> ToolEntry {
         ToolEntry {
             name: name.to_string(),
             target: target.map(|s| s.to_string()),
             completed,
             error: false,
+            seq,
         }
     }
 
@@ -513,12 +535,12 @@ mod tests {
     }
 
     #[test]
-    fn activity_completed_tools_grouped() {
+    fn activity_completed_tools_grouped_consecutively() {
         let mut tools = HashMap::new();
-        tools.insert("t1".into(), tool("Read", Some("a.rs"), true));
-        tools.insert("t2".into(), tool("Read", Some("b.rs"), true));
-        tools.insert("t3".into(), tool("Read", Some("c.rs"), true));
-        tools.insert("t4".into(), tool("Grep", Some("TODO"), true));
+        tools.insert("t1".into(), tool_seq("Read", Some("a.rs"), true, 0));
+        tools.insert("t2".into(), tool_seq("Read", Some("b.rs"), true, 1));
+        tools.insert("t3".into(), tool_seq("Read", Some("c.rs"), true, 2));
+        tools.insert("t4".into(), tool_seq("Grep", Some("TODO"), true, 3));
         let transcript = TranscriptData {
             tools,
             ..Default::default()
@@ -624,6 +646,7 @@ mod tests {
                 description: Some("find files".into()),
                 start_time: Some(chrono::Utc::now().timestamp() - 135),
                 completed: false,
+                seq: 0,
             },
         );
         let transcript = TranscriptData {
@@ -650,6 +673,7 @@ mod tests {
                 description: None,
                 start_time: Some(chrono::Utc::now().timestamp() - 45),
                 completed: false,
+                seq: 0,
             },
         );
         let transcript = TranscriptData {
@@ -666,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_completed_agent_hidden() {
+    fn activity_completed_agent_in_history() {
         let mut agents = HashMap::new();
         agents.insert(
             "a1".into(),
@@ -676,6 +700,7 @@ mod tests {
                 description: None,
                 start_time: Some(chrono::Utc::now().timestamp() - 60),
                 completed: true,
+                seq: 0,
             },
         );
         let transcript = TranscriptData {
@@ -687,7 +712,7 @@ mod tests {
             ..Default::default()
         };
         let out = render(&data, &no_colors_cfg(), &transcript, None, None);
-        assert!(!out.contains("explore"));
+        assert!(out.contains("explore"));
     }
 
     #[test]
@@ -701,6 +726,7 @@ mod tests {
                 description: None,
                 start_time: Some(chrono::Utc::now().timestamp() - 10),
                 completed: false,
+                seq: 0,
             },
         );
         let transcript = TranscriptData {
@@ -1092,6 +1118,7 @@ mod tests {
                 description: None,
                 start_time: Some(chrono::Utc::now().timestamp() - 30),
                 completed: false,
+                seq: 2,
             },
         );
         let mut tasks = HashMap::new();
@@ -1348,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_line_with_only_completed_agents_is_none() {
+    fn activity_line_with_only_completed_agents_shows_history() {
         let mut agents = HashMap::new();
         agents.insert(
             "a1".into(),
@@ -1358,8 +1385,67 @@ mod tests {
                 description: None,
                 start_time: Some(chrono::Utc::now().timestamp() - 30),
                 completed: true,
+                seq: 0,
             },
         );
-        assert!(render_activity_line(&HashMap::new(), &agents, &Config::default()).is_none());
+        let result = render_activity_line(&HashMap::new(), &agents, &Config::default());
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("explore"));
+    }
+
+    #[test]
+    fn activity_consecutive_grouping_not_global() {
+        let mut tools = HashMap::new();
+        tools.insert("t1".into(), tool_seq("Read", Some("a.rs"), true, 0));
+        tools.insert("t2".into(), tool_seq("Read", Some("b.rs"), true, 1));
+        tools.insert("t3".into(), tool_seq("Grep", Some("foo"), true, 2));
+        tools.insert("t4".into(), tool_seq("Read", Some("c.rs"), true, 3));
+        let result = render_activity_line(&tools, &HashMap::new(), &no_colors_cfg());
+        let s = result.unwrap();
+        assert!(s.contains("Read x2"));
+        assert!(s.contains("Grep"));
+        let read_positions: Vec<_> = s.match_indices("Read").collect();
+        assert_eq!(read_positions.len(), 2);
+    }
+
+    #[test]
+    fn activity_chronological_order() {
+        let mut tools = HashMap::new();
+        tools.insert("t1".into(), tool_seq("Grep", Some("a"), true, 0));
+        tools.insert("t2".into(), tool_seq("Read", Some("b"), true, 1));
+        tools.insert("t3".into(), tool_seq("Edit", Some("c"), true, 2));
+        let result = render_activity_line(&tools, &HashMap::new(), &no_colors_cfg());
+        let s = result.unwrap();
+        let grep_pos = s.find("Grep").unwrap();
+        let read_pos = s.find("Read").unwrap();
+        let edit_pos = s.find("Edit").unwrap();
+        assert!(grep_pos < read_pos);
+        assert!(read_pos < edit_pos);
+    }
+
+    #[test]
+    fn activity_agents_in_timeline() {
+        let mut tools = HashMap::new();
+        tools.insert("t1".into(), tool_seq("Read", Some("a.rs"), true, 0));
+        let mut agents = HashMap::new();
+        agents.insert(
+            "a1".into(),
+            AgentEntry {
+                subagent_type: Some("explore".into()),
+                model: None,
+                description: None,
+                start_time: Some(chrono::Utc::now().timestamp() - 10),
+                completed: false,
+                seq: 1,
+            },
+        );
+        tools.insert("t2".into(), tool_seq("Edit", Some("b.rs"), false, 2));
+        let result = render_activity_line(&tools, &agents, &no_colors_cfg());
+        let s = result.unwrap();
+        let read_pos = s.find("Read").unwrap();
+        let explore_pos = s.find("explore").unwrap();
+        let edit_pos = s.find("Edit").unwrap();
+        assert!(read_pos < explore_pos);
+        assert!(explore_pos < edit_pos);
     }
 }

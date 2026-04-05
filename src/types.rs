@@ -82,6 +82,8 @@ pub struct State {
     pub tasks: HashMap<String, TaskItem>,
     pub git_index_mtime: Option<i64>,
     pub cached_rate_limits: Option<CachedRateLimits>,
+    #[serde(default)]
+    pub next_seq: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -90,6 +92,8 @@ pub struct ToolEntry {
     pub target: Option<String>,
     pub completed: bool,
     pub error: bool,
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -99,6 +103,8 @@ pub struct AgentEntry {
     pub description: Option<String>,
     pub start_time: Option<i64>,
     pub completed: bool,
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

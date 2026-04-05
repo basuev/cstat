@@ -32,6 +32,7 @@ pub fn parse_transcript(path: Option<&str>, state: &mut State) -> TranscriptData
         state.agents.clear();
         state.todos.clear();
         state.tasks.clear();
+        state.next_seq = 0;
     }
 
     state.inode = inode;
@@ -123,6 +124,8 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                     .map(|dt| dt.timestamp())
             });
 
+            let seq = state.next_seq;
+            state.next_seq += 1;
             state.agents.insert(
                 id.to_string(),
                 AgentEntry {
@@ -131,6 +134,7 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                     description,
                     start_time,
                     completed: false,
+                    seq,
                 },
             );
         } else if name == "TodoWrite" {
@@ -174,6 +178,8 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                 }
             }
         } else {
+            let seq = state.next_seq;
+            state.next_seq += 1;
             state.tools.insert(
                 id.to_string(),
                 ToolEntry {
@@ -181,6 +187,7 @@ fn parse_assistant_message(entry: &Value, state: &mut State) {
                     target,
                     completed: false,
                     error: false,
+                    seq,
                 },
             );
         }
